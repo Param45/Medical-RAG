@@ -1,0 +1,11 @@
+{
+  "_comment": "Medical oncology abbreviation dictionary — seeded per SRS §5.4.1. Expand as needed for corpus coverage. To be fully populated in BUILD_GUIDE Task 1.6.",
+  "MRM": {"canonical": "Modified Radical Mastectomy", "type": "Procedure"},
+  "IDC": {"canonical": "Invasive Ductal Carcinoma", "type": "Diagnosis"},
+  "NST": {"canonical": "No Special Type", "type": "Modifier"},
+  "EC": {"canonical": "Epirubicin + Cyclophosphamide", "type": "Regimen"},
+  "5FU": {"canonical": "Fluorouracil", "type": "Medication"},
+  "ER": {"canonical": "Estrogen Receptor", "type": "Biomarker"},
+  "PR": {"canonical": "Progesterone Receptor", "type": "Biomarker"},
+  "HER2": {"canonical": "Human Epidermal Growth Factor Receptor 2", "type": "Biomarker"}
+}

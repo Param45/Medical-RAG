@@ -1,0 +1,18 @@
+{
+  "models-dir": "D:\\Extras\\Deecogs\\Medical RAG\\models",
+  "device-mode": "cpu",
+  "table-config": {
+    "model": "rapid_table",
+    "enable": false,
+    "max_time": 400
+  },
+  "layout-config": {
+    "model": "doclayout_yolo"
+  },
+  "formula-config": {
+    "enable": false
+  },
+  "bucket_info": {
+    "[default]": [null, null, null]
+  }
+}
