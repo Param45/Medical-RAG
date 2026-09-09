@@ -254,6 +254,73 @@ def print_ocr_output(output: dict, max_lines: int = 25):
     print("=" * 70)
 
 
+def save_ocr_artifacts(image: np.ndarray, output: dict, base_name: str):
+    """
+    Save the rendered page image, bounding box overlay image, OCR text, and JSON
+    to data/pages/ and data/ocr/ for cross-verification against original documents.
+    """
+    import json
+
+    pages_dir = Path("data/pages")
+    ocr_dir = Path("data/ocr")
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    ocr_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Save original rendered page image
+    img_path = pages_dir / f"{base_name}.png"
+    cv2.imwrite(str(img_path), image)
+
+    # 2. Save plain text
+    res = output.get("result")
+    lines_data = []
+    if res and res[0]:
+        for item in res[0]:
+            if len(item) >= 2 and isinstance(item[1], (list, tuple)):
+                box, (text, score) = item[0], item[1]
+                lines_data.append({"bbox": box, "text": text, "confidence": round(float(score), 4)})
+
+    txt_path = ocr_dir / f"{base_name}_ocr.txt"
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(f"# OCR Output for: {base_name}\n")
+        f.write(f"# Script: {output.get('script', '').upper()} | Language: {output.get('lang', '')}\n")
+        f.write(f"# Average Confidence: {output.get('avg_confidence', 0):.2%}\n")
+        f.write(f"# Execution Time: {output.get('elapsed_seconds', 0):.2f}s\n")
+        f.write("=" * 60 + "\n\n")
+        for i, line in enumerate(lines_data, 1):
+            f.write(f"[{i:03d}] (conf: {line['confidence']:.2f})  {line['text']}\n")
+
+    # 3. Save JSON output
+    json_path = ocr_dir / f"{base_name}_ocr.json"
+    json_payload = {
+        "source": base_name,
+        "script": output.get("script"),
+        "lang": output.get("lang"),
+        "avg_confidence": output.get("avg_confidence"),
+        "elapsed_seconds": output.get("elapsed_seconds"),
+        "total_chars": output.get("total_chars"),
+        "devanagari_chars": output.get("devanagari_chars"),
+        "lines": lines_data,
+    }
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(json_payload, f, ensure_ascii=False, indent=2)
+
+    # 4. Save bounding box annotated image
+    annotated = image.copy()
+    for line in lines_data:
+        box = np.array(line["bbox"], dtype=np.int32)
+        cv2.polylines(annotated, [box], isClosed=True, color=(0, 255, 0), thickness=2)
+    boxes_path = ocr_dir / f"{base_name}_boxes.png"
+    cv2.imwrite(str(boxes_path), annotated)
+
+    print("\n" + "-" * 70)
+    print("📁 SAVED ARTIFACTS FOR VERIFICATION:")
+    print(f"  • Page Image:    {img_path}")
+    print(f"  • Full Text:     {txt_path}")
+    print(f"  • JSON Data:     {json_path}")
+    print(f"  • Box Overlay:   {boxes_path}")
+    print("-" * 70)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Medical RAG - MinerU OCR Smoke Test")
     parser.add_argument("--pdf", type=str, default="data/raw/patient_a.pdf", help="Path to PDF file")
@@ -272,6 +339,7 @@ def main():
         print("[*] Generating synthetic Hindi consent form page for testing...")
         image = create_synthetic_hindi_sample()
         source_label = "Synthetic Hindi Consent Sample"
+        base_name = "synthetic_hindi_consent"
     elif args.image:
         print(f"[*] Loading image: {args.image}")
         if not os.path.exists(args.image):
@@ -279,12 +347,15 @@ def main():
             sys.exit(1)
         image = cv2.imread(args.image)
         source_label = args.image
+        base_name = Path(args.image).stem
     else:
         pdf_path = args.pdf
         print(f"[*] Rendering page {args.page} of {pdf_path}...")
         try:
             image = render_pdf_page(pdf_path, args.page)
             source_label = f"{pdf_path} (Page {args.page})"
+            stem = Path(pdf_path).stem
+            base_name = f"{stem}_page_{args.page}"
         except Exception as e:
             print(f"[ERROR] Failed to load/render PDF: {e}", file=sys.stderr)
             sys.exit(1)
@@ -294,10 +365,14 @@ def main():
     # 2. Run OCR
     output = run_bilingual_ocr(image, strategy=args.lang)
 
-    # 3. Print results
+    # 3. Print results to console
     print_ocr_output(output, max_lines=args.max_lines)
+
+    # 4. Save artifacts to disk
+    save_ocr_artifacts(image, output, base_name)
     print("[SUCCESS] Local MinerU OCR smoke test completed successfully!")
 
 
 if __name__ == "__main__":
     main()
+
