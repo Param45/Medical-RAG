@@ -21,16 +21,17 @@ def _find_poppler_path() -> Optional[str]:
     if shutil.which("pdftoppm"):
         return None
     
-    # Common Windows installation paths for poppler
-    possible_roots = [
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages",
-        Path(os.environ.get("ProgramFiles", "C:\\Program Files")),
-        Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")),
+    # Specific known Windows installation paths for poppler
+    known_paths = [
+        Path(r"C:\Program Files\poppler\bin"),
+        Path(r"C:\Program Files (x86)\poppler\bin"),
+        Path(r"C:\poppler\bin"),
+        Path(r"C:\tools\poppler\bin"),
+        Path(os.environ.get("LOCALAPPDATA", "")) / "poppler" / "bin",
     ]
-    for root in possible_roots:
-        if root.exists():
-            for p in root.glob("**/pdftoppm.exe"):
-                return str(p.parent)
+    for p in known_paths:
+        if (p / "pdftoppm.exe").exists():
+            return str(p)
     return None
 
 
@@ -68,6 +69,15 @@ def render_pdf_to_pages(
     """
     out_dir = Path(output_dir) / patient_id
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if existing pages are already rendered
+    existing_pages = sorted(
+        out_dir.glob("page_*.png"),
+        key=lambda p: int(p.stem.split("_")[1]) if "_" in p.stem and p.stem.split("_")[1].isdigit() else 0
+    )
+    if existing_pages:
+        print(f"[{patient_id}] {len(existing_pages)} pages already rendered (skipping convert_from_path)")
+        return existing_pages
 
     if poppler_path is None:
         poppler_path = _find_poppler_path()

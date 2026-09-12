@@ -225,9 +225,6 @@ def ocr_all_pages(
         print(f"[*] No pages directory found at {pages_path}")
         return []
 
-    if provider is None:
-        provider = get_ocr_provider()
-
     # Collect page files in page_number order
     page_files: List[Tuple[int, Path]] = []
     for file_p in pages_path.glob("page_*.png"):
@@ -239,6 +236,12 @@ def ocr_all_pages(
     results: List[PageOCRResult] = []
     seen_pages: List[Tuple[int, str, float]] = []  # (page_number, normalized_text, confidence)
 
+    def _get_provider():
+        nonlocal provider
+        if provider is None:
+            provider = get_ocr_provider()
+        return provider
+
     for page_num, img_path in page_files:
         json_path = out_dir / f"page_{page_num}.json"
         
@@ -249,10 +252,10 @@ def ocr_all_pages(
                     page_res = PageOCRResult.from_dict(json.load(f))
                 print(f"[{patient_id}] page {page_num} loaded from cache")
             except Exception:
-                page_res = provider.ocr_page(img_path, page_number=page_num)
+                page_res = _get_provider().ocr_page(img_path, page_number=page_num)
         else:
             print(f"[{patient_id}] OCR processing page {page_num}/{len(page_files)}...")
-            page_res = provider.ocr_page(img_path, page_number=page_num)
+            page_res = _get_provider().ocr_page(img_path, page_number=page_num)
 
         norm_text = normalize_text_for_dedup(page_res.raw_text)
 
