@@ -135,10 +135,11 @@ def dictionary_match(
             confidence=base_confidence,
         )
 
-    # 3. Fuzzy matching for multi-character terms (min length 3, not pure numbers)
-    if len(cleaned_term) >= 3 and not cleaned_term.isdigit():
-        keys_upper = {k.upper(): k for k in oncology_dict.keys()}
-        matches = difflib.get_close_matches(term_upper, keys_upper.keys(), n=1, cutoff=min_similarity)
+    # 3. Fuzzy matching for multi-character terms (min length 4, not pure numbers, high similarity)
+    # 3-letter abbreviations (e.g. LFT, RFT, CBC) must match exactly to avoid false positives with words like 'left'.
+    if len(cleaned_term) >= 4 and not cleaned_term.isdigit():
+        keys_upper = {k.upper(): k for k in oncology_dict.keys() if len(k) >= 4}
+        matches = difflib.get_close_matches(term_upper, keys_upper.keys(), n=1, cutoff=max(min_similarity, 0.88))
         if matches:
             matched_key = keys_upper[matches[0]]
             v = oncology_dict[matched_key]
