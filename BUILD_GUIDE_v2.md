@@ -316,19 +316,15 @@ Task: Implement `ocr.py`, wiring in the MinerU setup proven working in Task 0.4.
      short numeric tokens arranged in a grid-like pattern — or MinerU's own table-region output
      if available. Do not build a trained classifier.
 
-3. Also stub `ChandraOCRProvider(OCRProvider)` with a `NotImplementedError` body and a docstring
-   noting it exists only to satisfy the interface for future swap-in (per SRS FR-5.2.1) — it does
-   not need to work for this project.
-
-4. Function `get_ocr_provider() -> OCRProvider` reads `OCR_ENGINE` from `.env` and returns the
+3. Function `get_ocr_provider() -> OCRProvider` reads `OCR_ENGINE` from `.env` and returns the
    matching instance (`mineru` → MinerUProvider; anything else → raise a clear error).
 
-5. Function `ocr_all_pages(patient_id: str) -> None`:
+4. Function `ocr_all_pages(patient_id: str) -> None`:
    for every PNG under `data/pages/{patient_id}/`, in page-number order, call `ocr_page(...)`
    and write the result as `data/ocr/{patient_id}/page_{n}.json`. Sequential, per SRS FR-5.1.4.
    Skip a page if its OCR JSON already exists AND is newer than the PNG (simple idempotency).
 
-6. Implement the near-duplicate skip logic from SRS FR-5.2.5: while iterating a patient's pages
+5. Implement the near-duplicate skip logic from SRS FR-5.2.5: while iterating a patient's pages
    in order, keep a running list of already-seen `raw_text` strings (normalized: lowercase,
    whitespace-collapsed); if a new page's normalized text has >90% similarity (use
    `difflib.SequenceMatcher` ratio) to any previously seen page for the SAME patient, keep only
@@ -336,7 +332,7 @@ Task: Implement `ocr.py`, wiring in the MinerU setup proven working in Task 0.4.
    extra field `"duplicate_of": <page_number>` so downstream chunking (Task 1.7) can skip it, and
    print a log line noting the skip.
 
-7. `if __name__ == "__main__":` iterate `patients.all_patient_ids()` and call `ocr_all_pages` for
+6. `if __name__ == "__main__":` iterate `patients.all_patient_ids()` and call `ocr_all_pages` for
    each — runnable as `python ocr.py`.
 
 Output: `python ocr.py` (after `python ingest.py` has already produced page PNGs) populates

@@ -4,7 +4,7 @@ medical_rag/
 
 # Environment secrets (never commit)
 .env
-
+.env.example
 # Generated page images (large, reproducible from PDFs)
 data/pages/
 
