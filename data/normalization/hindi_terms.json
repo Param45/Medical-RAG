@@ -1,0 +1,20 @@
+{
+  "_comment": "Hindi/Devanagari normalization dictionary — seeded per SRS §5.4.1 and BUILD_GUIDE Task 1.6.",
+  "सहमति पत्र": {"canonical": "Consent Form", "type": "DocumentSection"},
+  "सहमति": {"canonical": "Consent", "type": "DocumentSection"},
+  "रोगी के हस्ताक्षर": {"canonical": "Patient Signature", "type": "DocumentSection"},
+  "गवाह के हस्ताक्षर": {"canonical": "Witness Signature", "type": "DocumentSection"},
+  "साक्षी के हस्ताक्षर": {"canonical": "Witness Signature", "type": "DocumentSection"},
+  "चिकित्सक के हस्ताक्षर": {"canonical": "Doctor Signature", "type": "DocumentSection"},
+  "दिनांक": {"canonical": "Date", "type": "DocumentSection"},
+  "नाम": {"canonical": "Name", "type": "DocumentSection"},
+  "उम्र": {"canonical": "Age", "type": "DocumentSection"},
+  "लिंग": {"canonical": "Gender", "type": "DocumentSection"},
+  "हस्ताक्षर": {"canonical": "Signature", "type": "DocumentSection"},
+  "अस्पताल": {"canonical": "Hospital", "type": "Organization"},
+  "संस्थान": {"canonical": "Institute", "type": "Organization"},
+  "कैन्सर अस्पताल": {"canonical": "Cancer Hospital", "type": "Organization"},
+  "रोटरी कैन्सर अस्पताल": {"canonical": "Rotary Cancer Hospital", "type": "Organization"},
+  "डॉ॰ बी॰ आर॰ अम्बेडकर संस्थान": {"canonical": "Dr. B.R. Ambedkar Institute", "type": "Organization"},
+  "अखिल भारतीय आयुर्विज्ञान संस्थान": {"canonical": "All India Institute of Medical Sciences", "type": "Organization"}
+}
