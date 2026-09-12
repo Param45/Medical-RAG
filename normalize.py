@@ -333,7 +333,11 @@ def llm_normalize(
         response = chat([{"role": "user", "content": prompt}])
         if not response or response.strip() == "null":
             return None
-        data = json.loads(response.strip())
+        raw_resp = response.strip()
+        if raw_resp.startswith("```"):
+            raw_resp = re.sub(r"^```(?:json)?\s*", "", raw_resp)
+            raw_resp = re.sub(r"\s*```$", "", raw_resp)
+        data = json.loads(raw_resp.strip())
         if isinstance(data, dict) and "canonical" in data and "type" in data:
             return NormalizedEntity(
                 raw_text=term,
