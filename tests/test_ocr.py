@@ -75,9 +75,10 @@ class TestOCR(unittest.TestCase):
         self.assertFalse(detect_table_heuristic([], prose_text))
 
     def test_get_ocr_provider_factory(self):
-        with patch.dict("os.environ", {"OCR_ENGINE": "mineru"}):
-            provider = get_ocr_provider()
-            self.assertIsInstance(provider, MinerUProvider)
+        with patch("ocr.PytorchPaddleOCR", object):
+            with patch.dict("os.environ", {"OCR_ENGINE": "mineru"}):
+                provider = get_ocr_provider()
+                self.assertIsInstance(provider, MinerUProvider)
 
         with patch.dict("os.environ", {"OCR_ENGINE": "unsupported_engine"}):
             with self.assertRaises(ValueError):

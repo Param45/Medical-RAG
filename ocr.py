@@ -15,9 +15,10 @@ import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
-import numpy as np
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = lambda *args, **kwargs: None
 
 # Ensure UTF-8 stdout on Windows
 if hasattr(sys.stdout, "reconfigure"):
