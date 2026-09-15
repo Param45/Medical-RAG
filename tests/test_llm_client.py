@@ -33,35 +33,53 @@ class TestLLMClientGemini:
             system="You are a helpful assistant.",
         )
 
-    @patch("google.genai.Client")
-    def test_gemini_call_sdk_integration(self, mock_client_cls):
+    def test_gemini_call_sdk_integration(self):
+        mock_genai = MagicMock()
+        mock_types = MagicMock()
         mock_client = MagicMock()
-        mock_client_cls.return_value = mock_client
+        mock_genai.Client.return_value = mock_client
 
         mock_response = MagicMock()
         mock_response.text = "Mocked Gemini SDK response"
         mock_client.models.generate_content.return_value = mock_response
 
-        messages = [
-            {"role": "user", "content": "First prompt"},
-            {"role": "assistant", "content": "Assistant reply"},
-            {"role": "user", "content": "Second prompt"},
-        ]
-        result = llm_client._call_gemini(
-            api_key="fake_key",
-            model="gemini-2.5-flash",
-            messages=messages,
-            system="Test system",
-        )
+        class DummyContent:
+            def __init__(self, role, parts):
+                self.role = role
+                self.parts = parts
 
-        assert result == "Mocked Gemini SDK response"
-        mock_client.models.generate_content.assert_called_once()
-        call_kwargs = mock_client.models.generate_content.call_args[1]
-        assert call_kwargs["model"] == "gemini-2.5-flash"
-        assert len(call_kwargs["contents"]) == 3
-        assert call_kwargs["contents"][0].role == "user"
-        assert call_kwargs["contents"][1].role == "model"
-        assert call_kwargs["contents"][2].role == "user"
+        mock_types.Content = DummyContent
+        mock_types.Part.from_text = lambda text: text
+
+        mock_google = MagicMock()
+        mock_google.genai = mock_genai
+        mock_genai.types = mock_types
+
+        with patch.dict("sys.modules", {
+            "google": mock_google,
+            "google.genai": mock_genai,
+            "google.genai.types": mock_types,
+        }):
+            messages = [
+                {"role": "user", "content": "First prompt"},
+                {"role": "assistant", "content": "Assistant reply"},
+                {"role": "user", "content": "Second prompt"},
+            ]
+            result = llm_client._call_gemini(
+                api_key="fake_key",
+                model="gemini-2.5-flash",
+                messages=messages,
+                system="Test system",
+            )
+
+            assert result == "Mocked Gemini SDK response"
+            mock_client.models.generate_content.assert_called_once()
+            call_kwargs = mock_client.models.generate_content.call_args[1]
+            assert call_kwargs["model"] == "gemini-2.5-flash"
+            assert len(call_kwargs["contents"]) == 3
+            assert call_kwargs["contents"][0].role == "user"
+            assert call_kwargs["contents"][1].role == "model"
+            assert call_kwargs["contents"][2].role == "user"
 
 
 class TestLLMClientAnthropic:
