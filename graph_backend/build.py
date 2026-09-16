@@ -364,20 +364,25 @@ def write_triples_to_neo4j(
                 dose = props.get("dose", "")
                 cycle = props.get("cycle", "")
                 if obj_label == "Regimen" or "regimen" in canonical.lower():
+                    admin_date = props.get("date") or report_date or ""
                     session.run(
                         """
                         MERGE (r:Report {report_id: $report_id})
                         MERGE (reg:Regimen {canonical_name: $canonical_name})
                         MERGE (r)-[rel:ADMINISTERED]->(reg)
-                        SET rel.evidence_id = $evidence_id, rel.confidence = $confidence
+                        SET rel.date = $admin_date,
+                            rel.evidence_id = $evidence_id,
+                            rel.confidence = $confidence
                         """,
                         report_id=report_id,
                         canonical_name=canonical,
+                        admin_date=admin_date,
                         evidence_id=evidence_id,
                         confidence=confidence,
                     )
                     written_count += 1
                 else:
+                    admin_date = props.get("date") or report_date or ""
                     session.run(
                         """
                         MERGE (r:Report {report_id: $report_id})
@@ -385,6 +390,7 @@ def write_triples_to_neo4j(
                         MERGE (r)-[rel:ADMINISTERED]->(m)
                         SET rel.dose = $dose,
                             rel.cycle = $cycle,
+                            rel.date = $admin_date,
                             rel.evidence_id = $evidence_id,
                             rel.confidence = $confidence
                         """,
@@ -392,6 +398,7 @@ def write_triples_to_neo4j(
                         canonical_name=canonical,
                         dose=dose,
                         cycle=cycle,
+                        admin_date=admin_date,
                         evidence_id=evidence_id,
                         confidence=confidence,
                     )

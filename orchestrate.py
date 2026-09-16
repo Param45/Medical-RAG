@@ -52,7 +52,7 @@ def extract_and_filter_citations(
         return "", []
 
     # Find all bracketed tokens that match evidence_id structure
-    # Matches patterns like [patient_a__report_0001__page_1__chunk_0] or [patient_b__report_0002__page_2__chunk_0]
+    # Matches patterns like [patient_a__report_0001__page_1__chunk_0] or test fixtures like [ev_a]
     citation_pattern = re.compile(r"\[([a-zA-Z0-9_\-]+)\]")
 
     found_citations: List[str] = []
@@ -67,6 +67,48 @@ def extract_and_filter_citations(
 
     return answer_text, found_citations
 
+
+def _post_process_answer(answer_text: str) -> str:
+    """
+    Post-processes the LLM-generated answer to clean up common quality issues:
+    - Strips visible chain-of-thought / 'thinking' blocks that some models emit
+    - Removes consecutive duplicate lines (common with smaller local models)
+    - Truncates excessively long answers
+    """
+    if not answer_text:
+        return answer_text
+
+    # 1. Strip chain-of-thought blocks
+    # Remove <think>...</think> and <thought>...</thought> XML-style wrappers
+    cleaned = re.sub(r'<think>.*?</think>', '', answer_text, flags=re.DOTALL)
+    cleaned = re.sub(r'<thought>.*?</thought>', '', cleaned, flags=re.DOTALL)
+    # Remove leading "thought\n" or "thinking\n" prefixes (some models emit these)
+    cleaned = re.sub(r'^\s*(?:thought|thinking)\s*\n', '', cleaned, flags=re.IGNORECASE)
+
+    # 2. Deduplicate repeated lines — allow each unique line at most twice
+    lines = cleaned.splitlines()
+    seen_count: Dict[str, int] = {}
+    deduped_lines: List[str] = []
+    for line in lines:
+        key = line.strip()
+        if not key:
+            deduped_lines.append(line)
+            continue
+        count = seen_count.get(key, 0) + 1
+        seen_count[key] = count
+        if count <= 2:
+            deduped_lines.append(line)
+
+    cleaned = "\n".join(deduped_lines).strip()
+
+    # 3. Truncate excessively long answers (> 3000 chars)
+    if len(cleaned) > 3000:
+        truncation_point = cleaned[:3000].rfind('\n')
+        if truncation_point < 2000:
+            truncation_point = 3000
+        cleaned = cleaned[:truncation_point].rstrip()
+
+    return cleaned
 
 def generate_answer(
     question: str,
@@ -130,6 +172,14 @@ def generate_answer(
         "4. If the question appears to ask for clinical advice, disease prognosis, or treatment recommendations, "
         "answer strictly with what is documented in the records and append this standard disclaimer sentence: "
         f"'{MEDICAL_DISCLAIMER}'.\n"
+        "5. DATE CAUTION: When multiple distinct events (different medications, different procedures) all share the "
+        "exact same date, be skeptical. Multi-page flowsheet reports may carry a single registration date even though "
+        "they document events spanning many years. If the date seems implausible for a given event (e.g. a modern drug "
+        "like Palbociclib shown on a 2004 date), omit the specific date or note the date may reflect the report "
+        "registration rather than the actual administration date.\n"
+        "6. Do NOT include internal reasoning, chain-of-thought, or 'thinking' blocks in your response. "
+        "Provide ONLY the final, polished clinical answer.\n"
+        "7. Keep your response concise. Do NOT repeat the same information. Each event should be stated only once.\n"
         f"{group_structure_instruction}"
     )
 
@@ -154,6 +204,9 @@ def generate_answer(
             f"An error occurred during answer generation ({exc}). Retrieved facts are available in evidence store.",
             list(valid_evidence_ids),
         )
+
+    # Post-process answer to clean up LLM artifacts (thought blocks, repetition)
+    raw_answer = _post_process_answer(raw_answer)
 
     # Perform grounding check on citations (SRS FR-8.2.2)
     cleaned_answer, valid_citations = extract_and_filter_citations(raw_answer, valid_evidence_ids)

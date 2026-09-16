@@ -145,8 +145,9 @@ def get_medication_history(
            'Medication' AS item_type,
            rel.dose AS dose,
            rel.cycle AS cycle,
-           r.report_date AS date,
+           coalesce(rel.date, r.report_date) AS date,
            r.report_id AS report_id,
+           r.report_type AS report_type,
            rel.evidence_id AS evidence_id,
            rel.confidence AS confidence
     ORDER BY date ASC
@@ -159,8 +160,9 @@ def get_medication_history(
            'Regimen' AS item_type,
            rel.dose AS dose,
            rel.cycle AS cycle,
-           r.report_date AS date,
+           coalesce(rel.date, r.report_date) AS date,
            r.report_id AS report_id,
+           r.report_type AS report_type,
            rel.evidence_id AS evidence_id,
            rel.confidence AS confidence
     ORDER BY date ASC
@@ -188,7 +190,9 @@ def get_medication_history(
                 dose_info = f" (Dose: {rec['dose']})" if rec.get("dose") else ""
                 cycle_info = f" Cycle {rec['cycle']}" if rec.get("cycle") else ""
                 dt = rec.get("date") or "undated"
-                fact_text = f"Administered Medication '{rec['name']}'{cycle_info}{dose_info} on {dt}"
+                rpt_type = rec.get("report_type", "")
+                source_note = f" (documented in {rpt_type})" if rpt_type else ""
+                fact_text = f"Administered Medication '{rec['name']}'{cycle_info}{dose_info} on {dt}{source_note}"
                 results.append({
                     "text": fact_text,
                     "patient_id": patient_id,
@@ -200,7 +204,9 @@ def get_medication_history(
             # Process Regimens
             for rec in session.run(query_regs, patient_id=patient_id):
                 dt = rec.get("date") or "undated"
-                fact_text = f"Administered Regimen '{rec['name']}' on {dt}"
+                rpt_type = rec.get("report_type", "")
+                source_note = f" (documented in {rpt_type})" if rpt_type else ""
+                fact_text = f"Administered Regimen '{rec['name']}' on {dt}{source_note}"
                 results.append({
                     "text": fact_text,
                     "patient_id": patient_id,
@@ -306,6 +312,7 @@ def get_staging_and_biomarkers(
 def classify_intent(question: str) -> str:
     """
     Classifies question intent into one of:
+    - "comprehensive_history"  (broad cancer/clinical timeline)
     - "lab_trend"
     - "diagnosis_list"
     - "medication_history"
@@ -313,6 +320,22 @@ def classify_intent(question: str) -> str:
     - "open_ended"
     """
     q_lower = question.lower()
+
+    # ── Comprehensive / broad history patterns (checked FIRST) ──
+    # These are broad questions that require facts from ALL data categories
+    # to build a proper answer.  Must be checked before narrower intents
+    # so that "cancer history" does not fall into "diagnosis_list".
+    if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
+        "cancer history", "clinical history", "complete history",
+        "overall history", "full history", "medical history",
+        "treatment history", "health history",
+        "chronological summary", "chronological", "timeline",
+        "progression", "course of treatment", "course of disease",
+        "summary of records", "all records", "health progress",
+        "complete summary", "overall summary", "full summary",
+        "entire history", "disease journey", "clinical journey",
+    ]):
+        return "comprehensive_history"
 
     # Diagnoses patterns (checked early for diagnosis-specific inquiries)
     if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
@@ -349,6 +372,7 @@ def classify_intent(question: str) -> str:
     # LLM classification fallback for ambiguous questions
     prompt = (
         f"Classify the following medical question into exactly ONE of these categories:\n"
+        f"- comprehensive_history  (broad questions about overall cancer/clinical history, timelines, or summaries)\n"
         f"- lab_trend\n"
         f"- diagnosis_list\n"
         f"- medication_history\n"
@@ -359,7 +383,7 @@ def classify_intent(question: str) -> str:
     )
     try:
         resp = chat([{"role": "user", "content": prompt}]).strip().lower()
-        valid_intents = {"lab_trend", "diagnosis_list", "medication_history", "staging_biomarker", "open_ended"}
+        valid_intents = {"comprehensive_history", "lab_trend", "diagnosis_list", "medication_history", "staging_biomarker", "open_ended"}
         for valid in valid_intents:
             if valid in resp:
                 return valid
@@ -448,6 +472,38 @@ def open_ended_query(
     return results
 
 
+def get_comprehensive_history(
+    patient_id: str,
+    driver=None,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieves a comprehensive clinical history for a patient by querying ALL
+    structured data categories: diagnoses, medications/procedures, staging/biomarkers,
+    and lab results. Merges and sorts results chronologically.
+
+    Used for broad questions like "cancer history", "chronological summary",
+    "overall timeline", etc. that require data from multiple categories.
+    """
+    all_facts: List[Dict[str, Any]] = []
+
+    # Gather from all categories
+    all_facts.extend(get_diagnoses(patient_id=patient_id, driver=driver))
+    all_facts.extend(get_medication_history(patient_id=patient_id, driver=driver))
+    all_facts.extend(get_staging_and_biomarkers(patient_id=patient_id, driver=driver))
+
+    # Sort chronologically — parse date strings for ordering, undated items last
+    def _date_sort_key(fact: Dict[str, Any]) -> str:
+        raw = fact.get("raw_data", {})
+        date_val = raw.get("date") or ""
+        if not date_val or date_val == "undated":
+            return "9999-99-99"  # Push undated items to end
+        return str(date_val)
+
+    all_facts.sort(key=_date_sort_key)
+
+    return all_facts
+
+
 def retrieve(
     question: str,
     patient_ids: List[str],
@@ -501,6 +557,10 @@ def retrieve(
 
             elif intent == "staging_biomarker":
                 facts = get_staging_and_biomarkers(patient_id=p_id, driver=driver)
+                all_facts.extend(facts)
+
+            elif intent == "comprehensive_history":
+                facts = get_comprehensive_history(patient_id=p_id, driver=driver)
                 all_facts.extend(facts)
 
             else:
