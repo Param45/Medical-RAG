@@ -8,7 +8,7 @@ Single thin wrapper function `chat(messages, system=None) -> str` used by:
 - Answer generation (SRS §8.2)
 
 Loads LLM_PROVIDER, LLM_API_KEY, and LLM_MODEL from .env.
-Supports both Local LLMs (MedGemma GGUF via llama-cpp-python) and Cloud APIs (Gemini, Anthropic, OpenAI).
+Supports both Cloud APIs (Gemini, Anthropic, OpenAI) and Local LLMs (MedGemma GGUF via llama-cpp-python).
 Includes a single retry on transient errors.
 """
 
@@ -28,13 +28,8 @@ _LOCAL_LLAMA_MODEL_PATH: Optional[str] = None
 
 def _resolve_local_model_path(model_path_or_name: Optional[str] = None) -> str:
     """Resolve local GGUF model path, checking models directory or downloading if needed."""
-    candidate_name = (
-        model_path_or_name
-        or os.getenv("LOCAL_MODEL_PATH")
-        or os.getenv("LLM_MODEL")
-        or "medgemma-1.5-4b-it-Q4_K_M.gguf"
-    )
-
+    candidate_name = model_path_or_name or os.getenv("LOCAL_MODEL_PATH") or os.getenv("LLM_MODEL") or "medgemma-1.5-4b-it-Q4_K_M.gguf"
+    
     # 1. Exact path as provided
     path_obj = Path(candidate_name)
     if path_obj.exists() and path_obj.is_file():
@@ -75,7 +70,7 @@ def _get_local_llama_client(model_path: Optional[str] = None) -> Any:
             "Install it via `pip install llama-cpp-python`."
         ) from e
 
-    n_ctx = int(os.getenv("LOCAL_LLM_N_CTX", "8192"))
+    n_ctx = int(os.getenv("LOCAL_LLM_N_CTX", "4096"))
     n_threads_env = os.getenv("LOCAL_LLM_N_THREADS")
     n_threads = int(n_threads_env) if n_threads_env and n_threads_env.isdigit() else None
 

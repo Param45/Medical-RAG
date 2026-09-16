@@ -18,14 +18,9 @@ streamlit>=1.35.0
 # Testing
 pytest>=8.0.0
 
-# Local LLM inference & Model downloading
-llama-cpp-python>=0.2.70
-huggingface-hub>=0.23.0
-
-# LLM SDKs (Optional cloud fallback providers)
+# LLM SDK (Anthropic Claude or Local Llama-cpp)
 anthropic>=0.30.0
-google-genai>=0.1.0
-openai>=1.0.0
+llama-cpp-python>=0.3.0
 
 # MinerU OCR (local PDF/OCR pipeline)
 # NOTE: magic-pdf[full] installs MinerU with all dependencies including

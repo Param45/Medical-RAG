@@ -1,7 +1,7 @@
 """
 Tests for LLM Client Wrapper (SRS §5.6, BUILD_GUIDE Task 2.1).
 
-All tests use mocks to avoid spending live API credits or requiring local model weights during unit tests.
+All tests use mocks to avoid spending live API credits or loading large models.
 """
 
 from unittest.mock import MagicMock, patch
@@ -12,12 +12,13 @@ from normalize import llm_normalize, NormalizedEntity
 
 
 class TestLLMClientLocal:
-    """Tests for Local LLM (llama-cpp-python / MedGemma GGUF) provider dispatch."""
+    """Tests for Local LLM (MedGemma / Llama-cpp) provider dispatch."""
 
     @patch("llm_client._call_local")
     def test_local_dispatch_basic(self, mock_local, monkeypatch):
         monkeypatch.setenv("LLM_PROVIDER", "local")
         monkeypatch.setenv("LLM_MODEL", "medgemma-1.5-4b-it-Q4_K_M.gguf")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
 
         mock_local.return_value = "Hello from Local MedGemma"
 
@@ -31,27 +32,24 @@ class TestLLMClientLocal:
             system="You are a medical assistant.",
         )
 
-    @patch("llm_client._get_local_llama_client")
-    def test_local_call_integration(self, mock_get_client):
-        mock_llama = MagicMock()
-        mock_get_client.return_value = mock_llama
-        mock_llama.create_chat_completion.return_value = {
-            "choices": [{"message": {"content": "Local model output"}}]
+    def test_local_call_sdk_mock(self):
+        mock_llama_instance = MagicMock()
+        mock_llama_instance.create_chat_completion.return_value = {
+            "choices": [{"message": {"content": "Local inference reply"}}]
         }
 
-        messages = [{"role": "user", "content": "Test prompt"}]
-        result = llm_client._call_local(
-            model="medgemma-1.5-4b-it-Q4_K_M.gguf",
-            messages=messages,
-            system="System instructions",
-        )
-
-        assert result == "Local model output"
-        mock_llama.create_chat_completion.assert_called_once()
-        kwargs = mock_llama.create_chat_completion.call_args[1]
-        assert len(kwargs["messages"]) == 2
-        assert kwargs["messages"][0]["role"] == "system"
-        assert kwargs["messages"][1]["role"] == "user"
+        with patch("llm_client._get_local_llama_client", return_value=mock_llama_instance):
+            messages = [{"role": "user", "content": "Test prompt"}]
+            result = llm_client._call_local(
+                model="medgemma-1.5-4b-it-Q4_K_M.gguf",
+                messages=messages,
+                system="System prompt",
+            )
+            assert result == "Local inference reply"
+            mock_llama_instance.create_chat_completion.assert_called_once()
+            call_args = mock_llama_instance.create_chat_completion.call_args[1]
+            assert call_args["messages"][0] == {"role": "system", "content": "System prompt"}
+            assert call_args["messages"][1] == {"role": "user", "content": "Test prompt"}
 
 
 class TestLLMClientGemini:
@@ -76,35 +74,53 @@ class TestLLMClientGemini:
             system="You are a helpful assistant.",
         )
 
-    @patch("google.genai.Client")
-    def test_gemini_call_sdk_integration(self, mock_client_cls):
+    def test_gemini_call_sdk_integration(self):
+        mock_genai = MagicMock()
+        mock_types = MagicMock()
         mock_client = MagicMock()
-        mock_client_cls.return_value = mock_client
+        mock_genai.Client.return_value = mock_client
 
         mock_response = MagicMock()
         mock_response.text = "Mocked Gemini SDK response"
         mock_client.models.generate_content.return_value = mock_response
 
-        messages = [
-            {"role": "user", "content": "First prompt"},
-            {"role": "assistant", "content": "Assistant reply"},
-            {"role": "user", "content": "Second prompt"},
-        ]
-        result = llm_client._call_gemini(
-            api_key="fake_key",
-            model="gemini-2.5-flash",
-            messages=messages,
-            system="Test system",
-        )
+        class DummyContent:
+            def __init__(self, role, parts):
+                self.role = role
+                self.parts = parts
 
-        assert result == "Mocked Gemini SDK response"
-        mock_client.models.generate_content.assert_called_once()
-        call_kwargs = mock_client.models.generate_content.call_args[1]
-        assert call_kwargs["model"] == "gemini-2.5-flash"
-        assert len(call_kwargs["contents"]) == 3
-        assert call_kwargs["contents"][0].role == "user"
-        assert call_kwargs["contents"][1].role == "model"
-        assert call_kwargs["contents"][2].role == "user"
+        mock_types.Content = DummyContent
+        mock_types.Part.from_text = lambda text: text
+
+        mock_google = MagicMock()
+        mock_google.genai = mock_genai
+        mock_genai.types = mock_types
+
+        with patch.dict("sys.modules", {
+            "google": mock_google,
+            "google.genai": mock_genai,
+            "google.genai.types": mock_types,
+        }):
+            messages = [
+                {"role": "user", "content": "First prompt"},
+                {"role": "assistant", "content": "Assistant reply"},
+                {"role": "user", "content": "Second prompt"},
+            ]
+            result = llm_client._call_gemini(
+                api_key="fake_key",
+                model="gemini-2.5-flash",
+                messages=messages,
+                system="Test system",
+            )
+
+            assert result == "Mocked Gemini SDK response"
+            mock_client.models.generate_content.assert_called_once()
+            call_kwargs = mock_client.models.generate_content.call_args[1]
+            assert call_kwargs["model"] == "gemini-2.5-flash"
+            assert len(call_kwargs["contents"]) == 3
+            assert call_kwargs["contents"][0].role == "user"
+            assert call_kwargs["contents"][1].role == "model"
+            assert call_kwargs["contents"][2].role == "user"
 
 
 class TestLLMClientAnthropic:
@@ -156,7 +172,7 @@ class TestLLMClientOpenAI:
 class TestLLMClientErrorsAndRetry:
     """Tests for retry logic and error reporting."""
 
-    def test_missing_api_key_for_cloud_raises_value_error(self, monkeypatch):
+    def test_missing_api_key_raises_value_error_for_cloud(self, monkeypatch):
         monkeypatch.setenv("LLM_PROVIDER", "gemini")
         monkeypatch.setenv("LLM_API_KEY", "")
         with pytest.raises(ValueError, match="LLM_API_KEY environment variable is not set"):

@@ -3,6 +3,7 @@ Download required MinerU / PDF-Extract-Kit models and local LLM GGUF models.
 Caches models under ./models directory (idempotent, skips if already downloaded).
 """
 
+import sys
 import argparse
 from pathlib import Path
 from huggingface_hub import hf_hub_download
@@ -61,7 +62,7 @@ def download_llm_model(
         print(f"[CACHED] {target_file} already exists ({target_file.stat().st_size:,} bytes). Skipping download.")
         return str(target_file)
 
-    print(f"[DOWNLOADING] {filename} from {repo_id} (~2.5 GB) ...")
+    print(f"[DOWNLOADING] {filename} from {repo_id} (~2.6 GB) ...")
     downloaded_path = hf_hub_download(
         repo_id=repo_id,
         filename=filename,
