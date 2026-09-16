@@ -1,7 +1,7 @@
 """
 Tests for LLM Client Wrapper (SRS §5.6, BUILD_GUIDE Task 2.1).
 
-All tests use mocks to avoid spending live API credits.
+All tests use mocks to avoid spending live API credits or requiring local model weights during unit tests.
 """
 
 from unittest.mock import MagicMock, patch
@@ -9,6 +9,49 @@ import pytest
 
 import llm_client
 from normalize import llm_normalize, NormalizedEntity
+
+
+class TestLLMClientLocal:
+    """Tests for Local LLM (llama-cpp-python / MedGemma GGUF) provider dispatch."""
+
+    @patch("llm_client._call_local")
+    def test_local_dispatch_basic(self, mock_local, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "local")
+        monkeypatch.setenv("LLM_MODEL", "medgemma-1.5-4b-it-Q4_K_M.gguf")
+
+        mock_local.return_value = "Hello from Local MedGemma"
+
+        messages = [{"role": "user", "content": "Hello!"}]
+        response = llm_client.chat(messages, system="You are a medical assistant.")
+
+        assert response == "Hello from Local MedGemma"
+        mock_local.assert_called_once_with(
+            model="medgemma-1.5-4b-it-Q4_K_M.gguf",
+            messages=messages,
+            system="You are a medical assistant.",
+        )
+
+    @patch("llm_client._get_local_llama_client")
+    def test_local_call_integration(self, mock_get_client):
+        mock_llama = MagicMock()
+        mock_get_client.return_value = mock_llama
+        mock_llama.create_chat_completion.return_value = {
+            "choices": [{"message": {"content": "Local model output"}}]
+        }
+
+        messages = [{"role": "user", "content": "Test prompt"}]
+        result = llm_client._call_local(
+            model="medgemma-1.5-4b-it-Q4_K_M.gguf",
+            messages=messages,
+            system="System instructions",
+        )
+
+        assert result == "Local model output"
+        mock_llama.create_chat_completion.assert_called_once()
+        kwargs = mock_llama.create_chat_completion.call_args[1]
+        assert len(kwargs["messages"]) == 2
+        assert kwargs["messages"][0]["role"] == "system"
+        assert kwargs["messages"][1]["role"] == "user"
 
 
 class TestLLMClientGemini:
@@ -113,12 +156,13 @@ class TestLLMClientOpenAI:
 class TestLLMClientErrorsAndRetry:
     """Tests for retry logic and error reporting."""
 
-    def test_missing_api_key_raises_value_error(self, monkeypatch):
+    def test_missing_api_key_for_cloud_raises_value_error(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "gemini")
         monkeypatch.setenv("LLM_API_KEY", "")
         with pytest.raises(ValueError, match="LLM_API_KEY environment variable is not set"):
             llm_client.chat([{"role": "user", "content": "test"}])
 
-    def test_unsupported_provider_raises_value_error(self, monkeypatch):
+    def test_unsupported_provider_raises_runtime_error(self, monkeypatch):
         monkeypatch.setenv("LLM_PROVIDER", "unsupported_provider_xyz")
         monkeypatch.setenv("LLM_API_KEY", "test_key")
         with pytest.raises(RuntimeError, match="Unsupported LLM_PROVIDER"):
