@@ -232,6 +232,10 @@ def _call_openai(
 def chat(
     messages: List[Dict[str, str]],
     system: Optional[str] = None,
+    task: Optional[str] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
     max_retries: int = 1,
     retry_delay_seconds: float = 1.0,
 ) -> str:
@@ -241,6 +245,11 @@ def chat(
     Args:
         messages: List of message dicts with keys 'role' ('user'|'assistant'|'model') and 'content'.
         system: Optional system instruction prompt.
+        task: Optional task type ('build' / 'ingestion' vs 'inference' / 'retrieve').
+              Defaults to environment routing (Gemini for build, Local LLM for inference).
+        provider: Optional explicit provider override ('gemini', 'local', 'anthropic', 'openai').
+        model: Optional explicit model override.
+        api_key: Optional explicit API key override.
         max_retries: Number of retry attempts on transient failures (default: 1).
         retry_delay_seconds: Delay before retry in seconds.
 
@@ -251,9 +260,57 @@ def chat(
         ValueError: If configuration (.env) is invalid or missing required keys.
         RuntimeError: If the LLM call fails after retries.
     """
-    provider = os.getenv("LLM_PROVIDER", "local").strip().lower()
-    api_key = os.getenv("LLM_API_KEY", "").strip()
-    model = os.getenv("LLM_MODEL", "").strip()
+    task_norm = (task or os.getenv("LLM_TASK", "")).strip().lower()
+
+    if not provider:
+        if task_norm in ("build", "ingestion", "rebuild"):
+            provider = (
+                os.getenv("LLM_BUILD_PROVIDER")
+                or os.getenv("LLM_PROVIDER_INGESTION")
+                or os.getenv("LLM_PROVIDER_EXTERNAL")
+                or "gemini"
+            ).strip().lower()
+        elif task_norm in ("inference", "query", "retrieve"):
+            provider = (
+                os.getenv("LLM_INFERENCE_PROVIDER")
+                or os.getenv("LLM_PROVIDER")
+                or "local"
+            ).strip().lower()
+        else:
+            provider = os.getenv("LLM_PROVIDER", "local").strip().lower()
+
+    if not model:
+        if task_norm in ("build", "ingestion", "rebuild"):
+            model = (
+                os.getenv("LLM_BUILD_MODEL")
+                or os.getenv("LLM_MODEL_INGESTION")
+                or os.getenv("LLM_MODEL_EXTERNAL")
+                or ("gemini-3.1-flash-lite" if provider in ("gemini", "google") else "")
+            ).strip()
+        elif task_norm in ("inference", "query", "retrieve"):
+            model = (
+                os.getenv("LLM_INFERENCE_MODEL")
+                or os.getenv("LLM_MODEL")
+                or ("medgemma-1.5-4b-it-Q4_K_M.gguf" if provider in ("local", "llama_cpp", "llama-cpp", "gguf", "medgemma") else "")
+            ).strip()
+        else:
+            model = os.getenv("LLM_MODEL", "").strip()
+
+    if not api_key:
+        if task_norm in ("build", "ingestion", "rebuild"):
+            api_key = (
+                os.getenv("LLM_BUILD_API_KEY")
+                or os.getenv("LLM_API_KEY")
+                or ""
+            ).strip()
+        elif task_norm in ("inference", "query", "retrieve"):
+            api_key = (
+                os.getenv("LLM_INFERENCE_API_KEY")
+                or os.getenv("LLM_API_KEY")
+                or ""
+            ).strip()
+        else:
+            api_key = os.getenv("LLM_API_KEY", "").strip()
 
     is_local = provider in ("local", "llama_cpp", "llama-cpp", "gguf", "medgemma")
 
@@ -270,12 +327,12 @@ def chat(
             "llama_cpp": "medgemma-1.5-4b-it-Q4_K_M.gguf",
             "gguf": "medgemma-1.5-4b-it-Q4_K_M.gguf",
             "medgemma": "medgemma-1.5-4b-it-Q4_K_M.gguf",
-            "gemini": "gemini-2.5-flash",
-            "google": "gemini-2.5-flash",
+            "gemini": os.getenv("LLM_MODEL_EXTERNAL", "gemini-3.1-flash-lite"),
+            "google": os.getenv("LLM_MODEL_EXTERNAL", "gemini-3.1-flash-lite"),
             "anthropic": "claude-3-5-sonnet-20241022",
             "openai": "gpt-4o",
         }
-        model = defaults.get(provider, "medgemma-1.5-4b-it-Q4_K_M.gguf" if is_local else "gemini-2.5-flash")
+        model = defaults.get(provider, "medgemma-1.5-4b-it-Q4_K_M.gguf" if is_local else "gemini-3.1-flash-lite")
 
     last_error: Optional[Exception] = None
     total_attempts = 1 + max_retries
@@ -304,3 +361,22 @@ def chat(
                 ) from exc
 
     raise RuntimeError(f"LLM call failed: {last_error}")
+
+
+def chat_build(
+    messages: List[Dict[str, str]],
+    system: Optional[str] = None,
+    **kwargs,
+) -> str:
+    """Convenience chat wrapper for rebuilding/ingestion tasks (defaults to Gemini)."""
+    return chat(messages, system=system, task="build", **kwargs)
+
+
+def chat_inference(
+    messages: List[Dict[str, str]],
+    system: Optional[str] = None,
+    **kwargs,
+) -> str:
+    """Convenience chat wrapper for query/inference tasks (defaults to Local LLM)."""
+    return chat(messages, system=system, task="inference", **kwargs)
+

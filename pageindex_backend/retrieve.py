@@ -230,6 +230,7 @@ def select_children(
         response = chat(
             messages=[{"role": "user", "content": user_prompt}],
             system=system_prompt,
+            task="inference",
             max_retries=2,
             retry_delay_seconds=4.0,
         ).strip()

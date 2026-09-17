@@ -254,3 +254,75 @@ class TestLLMNormalizeIntegration:
 
         result = llm_normalize("some term", context="some context")
         assert result is None
+
+
+class TestTaskRouting:
+    """Tests for task-specific routing: build -> Gemini, inference -> Local."""
+
+    @patch("llm_client._call_gemini")
+    @patch("llm_client._call_local")
+    def test_task_build_routes_to_gemini(self, mock_local, mock_gemini, monkeypatch):
+        monkeypatch.setenv("LLM_BUILD_PROVIDER", "gemini")
+        monkeypatch.setenv("LLM_BUILD_MODEL", "gemini-3.1-flash-lite")
+        monkeypatch.setenv("LLM_API_KEY", "test_gemini_key")
+        monkeypatch.setenv("LLM_PROVIDER", "local")
+
+        mock_gemini.return_value = "Gemini build output"
+
+        messages = [{"role": "user", "content": "Extract triples"}]
+        res = llm_client.chat(messages, task="build")
+
+        assert res == "Gemini build output"
+        mock_gemini.assert_called_once_with(
+            api_key="test_gemini_key",
+            model="gemini-3.1-flash-lite",
+            messages=messages,
+            system=None,
+        )
+        mock_local.assert_not_called()
+
+    @patch("llm_client._call_gemini")
+    @patch("llm_client._call_local")
+    def test_task_inference_routes_to_local(self, mock_local, mock_gemini, monkeypatch):
+        monkeypatch.setenv("LLM_BUILD_PROVIDER", "gemini")
+        monkeypatch.setenv("LLM_INFERENCE_PROVIDER", "local")
+        monkeypatch.setenv("LLM_INFERENCE_MODEL", "medgemma-1.5-4b-it-Q4_K_M.gguf")
+
+        mock_local.return_value = "Local inference output"
+
+        messages = [{"role": "user", "content": "Generate Cypher"}]
+        res = llm_client.chat(messages, task="inference")
+
+        assert res == "Local inference output"
+        mock_local.assert_called_once_with(
+            model="medgemma-1.5-4b-it-Q4_K_M.gguf",
+            messages=messages,
+            system=None,
+        )
+        mock_gemini.assert_not_called()
+
+    @patch("llm_client._call_gemini")
+    def test_chat_build_convenience_helper(self, mock_gemini, monkeypatch):
+        monkeypatch.setenv("LLM_BUILD_PROVIDER", "gemini")
+        monkeypatch.setenv("LLM_BUILD_MODEL", "gemini-3.1-flash-lite")
+        monkeypatch.setenv("LLM_API_KEY", "test_key")
+
+        mock_gemini.return_value = "Build summary"
+        messages = [{"role": "user", "content": "Summarize"}]
+        res = llm_client.chat_build(messages)
+
+        assert res == "Build summary"
+        mock_gemini.assert_called_once()
+
+    @patch("llm_client._call_local")
+    def test_chat_inference_convenience_helper(self, mock_local, monkeypatch):
+        monkeypatch.setenv("LLM_INFERENCE_PROVIDER", "local")
+        monkeypatch.setenv("LLM_INFERENCE_MODEL", "medgemma-1.5-4b-it-Q4_K_M.gguf")
+
+        mock_local.return_value = "Inference answer"
+        messages = [{"role": "user", "content": "Answer question"}]
+        res = llm_client.chat_inference(messages)
+
+        assert res == "Inference answer"
+        mock_local.assert_called_once()
+

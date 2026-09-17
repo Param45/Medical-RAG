@@ -330,7 +330,7 @@ def llm_normalize(
     )
 
     try:
-        response = chat([{"role": "user", "content": prompt}])
+        response = chat([{"role": "user", "content": prompt}], task="build")
         if not response or response.strip() == "null":
             return None
         raw_resp = response.strip()

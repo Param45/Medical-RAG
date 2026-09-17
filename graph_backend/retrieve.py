@@ -358,7 +358,7 @@ def classify_intent(question: str) -> str:
         f"Respond ONLY with the single category name."
     )
     try:
-        resp = chat([{"role": "user", "content": prompt}]).strip().lower()
+        resp = chat([{"role": "user", "content": prompt}], task="inference").strip().lower()
         valid_intents = {"lab_trend", "diagnosis_list", "medication_history", "staging_biomarker", "open_ended"}
         for valid in valid_intents:
             if valid in resp:
@@ -420,7 +420,7 @@ def open_ended_query(
 
     results: List[Dict[str, Any]] = []
     try:
-        resp = chat([{"role": "user", "content": prompt}]).strip()
+        resp = chat([{"role": "user", "content": prompt}], task="inference").strip()
         cypher_query = re.sub(r"^```(?:cypher)?\s*", "", resp)
         cypher_query = re.sub(r"\s*```$", "", cypher_query).strip()
 

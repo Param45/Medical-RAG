@@ -228,6 +228,7 @@ def extract_triples(
         response_text = chat(
             messages=[{"role": "user", "content": prompt}],
             system=EXTRACTION_SYSTEM_PROMPT,
+            task="build",
         )
         if not response_text or not response_text.strip():
             return []

@@ -81,6 +81,7 @@ def generate_report_summary(
         summary = chat(
             messages=[{"role": "user", "content": user_prompt}],
             system=system_prompt,
+            task="build",
             max_retries=2,
             retry_delay_seconds=4.0,
         ).strip()
@@ -134,6 +135,7 @@ def generate_root_summary(
         summary = chat(
             messages=[{"role": "user", "content": user_prompt}],
             system=system_prompt,
+            task="build",
             max_retries=2,
             retry_delay_seconds=4.0,
         ).strip()
