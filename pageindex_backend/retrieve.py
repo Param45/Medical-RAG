@@ -103,12 +103,6 @@ def should_allow_multi(question: str) -> bool:
         "follow-up",
         "monitoring",
         "throughout",
-        "cancer",
-        "summary",
-        "chronological",
-        "complete",
-        "overall",
-        "journey",
     ]
 
     for kw in multi_keywords:
@@ -385,8 +379,6 @@ def retrieve(
         return []
 
     allow_multi = should_allow_multi(question)
-    # Expand traversal budget for multi-branch queries to cover more reports
-    effective_max_nodes = max(max_nodes_expanded, 10) if allow_multi else max_nodes_expanded
     all_facts: List[Dict[str, Any]] = []
 
     for idx, p_id in enumerate(patient_ids):
@@ -398,7 +390,7 @@ def retrieve(
             question=question,
             patient_id=p_id,
             max_depth=max_depth,
-            max_nodes_expanded=effective_max_nodes,
+            max_nodes_expanded=max_nodes_expanded,
             allow_multi=allow_multi,
             pageindex_dir=pageindex_dir,
         )
