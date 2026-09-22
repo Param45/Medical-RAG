@@ -22,6 +22,13 @@ if hasattr(sys.stdout, "reconfigure"):
 class EvidenceRecord:
     """
     Evidence record schema (SRS §5.5.2).
+
+    report_date: The date on the report letterhead / header.
+    result_date: The date of the specific result within the report (e.g., per-column
+                 date in flowsheet tables). Falls back to report_date if not available.
+                 This distinction is critical for answering "sugar level at a specific
+                 time of year" — flowsheet tables have per-column dates that differ
+                 from the report letterhead date.
     """
     evidence_id: str
     patient_id: str
@@ -33,6 +40,7 @@ class EvidenceRecord:
     source_type: str  # "typed" | "tabular_handwritten" | "cursive_handwritten"
     confidence: float
     page_image_path: str
+    result_date: Optional[str] = None  # Per-column / per-row date, distinct from report_date
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -45,12 +53,14 @@ class EvidenceRecord:
             report_id=str(d.get("report_id", "")),
             report_type=str(d.get("report_type", "")),
             report_date=d.get("report_date"),
+            result_date=d.get("result_date"),
             page_number=int(d.get("page_number", 1)),
             raw_text=str(d.get("raw_text", "")),
             source_type=str(d.get("source_type", "typed")),
             confidence=float(d.get("confidence", 1.0)),
             page_image_path=str(d.get("page_image_path", "")),
         )
+
 
 
 def get_default_evidence_dir() -> Path:

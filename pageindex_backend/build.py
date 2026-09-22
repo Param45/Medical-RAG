@@ -11,9 +11,10 @@ Maps to BUILD_GUIDE Task 3.1.
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
 # Ensure project root is in sys.path
@@ -64,6 +65,9 @@ def generate_report_summary(
         "Summarize the given clinical report into 2 to 4 concise, factual sentences. "
         "Highlight primary diagnoses, procedures, key lab/pathology values, biomarker status, "
         "or clinical findings documented in the text. "
+        "You MUST explicitly preserve every lab value, date, dose, cycle number, and staging code present in the text verbatim. "
+        "Never paraphrase numbers into vague language like 'some lab values were recorded'. "
+        "Preserve the Impression and Comparison sentences from radiology and pathology reports verbatim. "
         "Do NOT invent or extrapolate facts not present in the provided text."
     )
 
@@ -145,6 +149,196 @@ def generate_root_summary(
         return f"Clinical record overview for {display_label} ({patient_id}) across {len(report_nodes)} reports."
 
 
+def extract_impression_and_comparison(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract IMPRESSION and COMPARISON sections from report text (Phase 3).
+    Especially useful for radiology and pathology reports.
+    """
+    if not text:
+        return None, None
+
+    impression = None
+    comparison = None
+
+    imp_match = re.search(
+        r'(?:IMPRESSION|CONCLUSION|OPINION)\s*[:\-]\s*(.*?)(?=\n\s*(?:RECOMMENDATION|PLAN|COMPARISON|TECHNIQUE|FINDINGS|[A-Z\s]{4,}:)|$)',
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if imp_match:
+        impression = imp_match.group(1).strip()
+
+    comp_match = re.search(
+        r'(?:COMPARISON|COMPARED WITH|COMPARED TO)\s*[:\-]\s*(.*?)(?=\n\s*(?:IMPRESSION|CONCLUSION|TECHNIQUE|FINDINGS|RECOMMENDATION|[A-Z\s]{4,}:)|$)',
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if comp_match:
+        comparison = comp_match.group(1).strip()
+
+    return impression, comparison
+
+
+def build_structured_facts(
+    patient_id: str,
+    chunks_data: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Build a StructuredFacts node for the patient (Phase 3).
+    Pre-computes structured medical facts (chemo cycles, treatment plans,
+    lab trends, suggested vs performed tests, medications).
+    Attempts to read from Neo4j; falls back to parsing chunks_data if Neo4j is offline.
+    """
+    structured_facts: Dict[str, Any] = {
+        "node_id": f"{patient_id}_structured_facts",
+        "node_type": "StructuredFacts",
+        "summary": (
+            "Pre-computed structured medical facts: lab trends, chemo cycles, "
+            "suggested vs performed tests, medication list, and treatment plan."
+        ),
+        "lab_time_series": [],
+        "chemo_cycles": [],
+        "treatment_plan": {},
+        "suggested_tests": [],
+        "current_medications": [],
+    }
+
+    # Attempt to populate from Neo4j
+    neo4j_success = False
+    try:
+        from graph_backend.build import get_driver
+        driver = get_driver()
+        with driver.session() as session:
+            # 1. Chemo administrations
+            c_res = session.run(
+                """
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[:HAS_CHEMO_ADMIN]->(ca:ChemoAdministration)
+                RETURN ca.cycle_number AS cycle_number, ca.regimen AS regimen,
+                       ca.date AS administration_date, r.evidence_id AS evidence_id
+                ORDER BY ca.cycle_number ASC, ca.date ASC
+                """,
+                pid=patient_id,
+            )
+            for rec in c_res:
+                structured_facts["chemo_cycles"].append({
+                    "cycle_number": rec.get("cycle_number"),
+                    "regimen": rec.get("regimen"),
+                    "date": rec.get("administration_date"),
+                    "evidence_id": rec.get("evidence_id"),
+                })
+
+            # 2. Treatment plan
+            tp_res = session.run(
+                """
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[:HAS_TREATMENT_PLAN]->(tp:TreatmentPlan)
+                RETURN tp.regimen AS regimen, tp.planned_cycles AS planned_cycles, r.evidence_id AS evidence_id
+                LIMIT 1
+                """,
+                pid=patient_id,
+            )
+            tp_rec = tp_res.single()
+            if tp_rec:
+                structured_facts["treatment_plan"] = {
+                    "regimen": tp_rec.get("regimen"),
+                    "planned_cycles": tp_rec.get("planned_cycles"),
+                    "evidence_id": tp_rec.get("evidence_id"),
+                }
+
+            # 3. Lab time series
+            l_res = session.run(
+                """
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[:HAS_RESULT]->(lr:LabResult)-[:OF_TEST]->(lt:LabTest)
+                RETURN lt.canonical_name AS test, lr.value AS value, lr.unit AS unit,
+                       coalesce(lr.result_date, lr.date, r.report_date) AS date,
+                       lr.abnormal_flag AS abnormal_flag, r.evidence_id AS evidence_id
+                ORDER BY date ASC, lt.canonical_name ASC
+                """,
+                pid=patient_id,
+            )
+            for rec in l_res:
+                structured_facts["lab_time_series"].append({
+                    "test": rec.get("test"),
+                    "value": rec.get("value"),
+                    "unit": rec.get("unit"),
+                    "date": rec.get("date"),
+                    "abnormal_flag": rec.get("abnormal_flag"),
+                    "evidence_id": rec.get("evidence_id"),
+                })
+
+            # 4. Suggested vs performed
+            s_res = session.run(
+                """
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[:SUGGESTS_TEST]->(lt:LabTest)
+                RETURN lt.canonical_name AS test_name, r.report_date AS suggested_date, r.evidence_id AS evidence_id
+                """,
+                pid=patient_id,
+            )
+            suggested_list = [
+                {"test_name": r.get("test_name"), "suggested_date": r.get("suggested_date"), "evidence_id": r.get("evidence_id")}
+                for r in s_res
+            ]
+            perf_res = session.run(
+                """
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[:HAS_RESULT]->(lr:LabResult)-[:OF_TEST]->(lt:LabTest)
+                RETURN DISTINCT toLower(lt.canonical_name) AS performed_test
+                """,
+                pid=patient_id,
+            )
+            perf_set = {r.get("performed_test") for r in perf_res if r.get("performed_test")}
+            for s in suggested_list:
+                t_name = s.get("test_name") or ""
+                s["performed"] = t_name.strip().lower() in perf_set
+            structured_facts["suggested_tests"] = suggested_list
+
+            # 5. Medications
+            m_res = session.run(
+                """
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[:PRESCRIBES]->(m:Medication)
+                RETURN m.canonical_name AS name, r.report_date AS start_date, r.evidence_id AS evidence_id
+                """,
+                pid=patient_id,
+            )
+            for rec in m_res:
+                structured_facts["current_medications"].append({
+                    "name": rec.get("name"),
+                    "dose": rec.get("dose"),
+                    "start_date": rec.get("start_date"),
+                    "evidence_id": rec.get("evidence_id"),
+                })
+        neo4j_success = True
+    except Exception:
+        neo4j_success = False
+
+    # Fallback to chunk scanning if Neo4j wasn't available or had no data
+    if not neo4j_success or not structured_facts["chemo_cycles"]:
+        for item in chunks_data:
+            ev = item.get("evidence_record", {})
+            raw_text = ev.get("raw_text", "")
+            ev_id = ev.get("evidence_id", "")
+            res_date = ev.get("result_date") or ev.get("report_date")
+
+            # Chemo cycle regex
+            chemo_m = re.search(r"(?:cycle|round)\s*[:#\-]?\s*(\d+)\s*(?:of\s*(\d+))?", raw_text, re.IGNORECASE)
+            if chemo_m:
+                c_num = int(chemo_m.group(1))
+                p_cycles = int(chemo_m.group(2)) if chemo_m.group(2) else None
+                if not any(c.get("cycle_number") == c_num for c in structured_facts["chemo_cycles"]):
+                    structured_facts["chemo_cycles"].append({
+                        "cycle_number": c_num,
+                        "regimen": None,
+                        "date": res_date,
+                        "evidence_id": ev_id,
+                    })
+                if p_cycles and not structured_facts["treatment_plan"]:
+                    structured_facts["treatment_plan"] = {
+                        "regimen": None,
+                        "planned_cycles": p_cycles,
+                        "evidence_id": ev_id,
+                    }
+
+    return structured_facts
+
+
 def build_tree_for_patient(
     patient_id: str,
     reports_dir: Optional[Path] = None,
@@ -153,7 +347,8 @@ def build_tree_for_patient(
     Build the 3-level PageIndex tree for a patient (SRS §7.1, §12.2).
     
     Tree structure:
-    Patient (root) -> Report -> Page (leaf)
+    Patient (root) -> Report -> Page/Row (leaf)
+    Plus synthetic StructuredFacts node at root level.
 
     Args:
         patient_id: Identifier of the patient (e.g., 'patient_a')
@@ -196,7 +391,7 @@ def build_tree_for_patient(
 
         matching_chunks = chunks_by_report.get(report_id, [])
 
-        # Build leaf Page nodes
+        # Build leaf Page / Row nodes
         page_nodes: List[Dict[str, Any]] = []
         page_texts: List[str] = []
 
@@ -208,8 +403,16 @@ def build_tree_for_patient(
             page_num = ev.get("page_number", 1)
             raw_text = ev.get("raw_text", "")
             evidence_id = ev.get("evidence_id", "")
+            chunk_type = ev.get("chunk_type", "page")
+            source_type = ev.get("source_type", "typed")
+            result_date = ev.get("result_date")
 
-            base_node_id = f"{report_id}_page_{page_num}"
+            chunk_id = chunk_item.get("chunk_id", "")
+            if chunk_type == "row" and chunk_id:
+                base_node_id = f"{report_id}_p{page_num}_{chunk_id}"
+            else:
+                base_node_id = f"{report_id}_page_{page_num}"
+
             if base_node_id in seen_page_ids:
                 seen_page_ids[base_node_id] += 1
                 leaf_node_id = f"{base_node_id}_chunk_{seen_page_ids[base_node_id]}"
@@ -220,6 +423,10 @@ def build_tree_for_patient(
             page_node = {
                 "node_id": leaf_node_id,
                 "node_type": "Page",
+                "chunk_type": chunk_type,
+                "source_type": source_type,
+                "result_date": result_date,
+                "page_number": page_num,
                 "raw_text": raw_text,
                 "evidence_id": evidence_id,
             }
@@ -229,6 +436,9 @@ def build_tree_for_patient(
 
         # Concatenate text from all child chunks for LLM report summary
         concat_report_text = "\n\n".join(page_texts)
+
+        # Extract impression and comparison for radiology/pathology
+        impression, comparison = extract_impression_and_comparison(concat_report_text)
 
         # Generate report summary via LLM (SRS FR-7.1.2)
         report_summary = generate_report_summary(
@@ -244,6 +454,8 @@ def build_tree_for_patient(
             "report_type": report_type,
             "report_date": report_date,
             "summary": report_summary,
+            "impression": impression,
+            "comparison": comparison,
             "children": page_nodes,
         }
         report_nodes.append(report_node)
@@ -252,14 +464,19 @@ def build_tree_for_patient(
         if "pytest" not in sys.modules:
             time.sleep(1.5)
 
+    # Build StructuredFacts synthetic node
+    structured_facts_node = build_structured_facts(patient_id, chunks_data)
+
     # Generate root summary via LLM across all report summaries (SRS FR-7.1.2)
     root_summary = generate_root_summary(patient_id, report_nodes)
 
     tree = {
         "patient_id": patient_id,
+        "structured_facts": structured_facts_node,
         "root": {
             "node_id": "root",
             "summary": root_summary,
+            "structured_facts": structured_facts_node,
             "children": report_nodes,
         },
     }

@@ -29,6 +29,7 @@ load_dotenv()
 
 from graph_backend.build import get_driver
 from llm_client import chat
+from normalize import canonicalize_lab_name
 
 
 def get_lab_trend(
@@ -303,9 +304,358 @@ def get_staging_and_biomarkers(
     return results
 
 
+def get_chemo_cycle_status(
+    patient_id: str,
+    driver=None,
+) -> List[Dict[str, Any]]:
+    """
+    Deterministic chemo cycle status retrieval.
+    Computes completed cycles and remaining cycles in Python, not the LLM.
+    Answers: "how many cycles", "remaining cycles", "completed chemo round"
+    """
+    should_close_driver = False
+    if driver is None:
+        driver = get_driver()
+        should_close_driver = True
+
+    results: List[Dict[str, Any]] = []
+    try:
+        with driver.session() as session:
+            # Get all chemo administrations with cycle numbers
+            admin_records = session.run(
+                """
+                MATCH (p:Patient {patient_id: $patient_id})-[:HAS_REPORT]->(r:Report)-[rel:HAS_CHEMO_ADMIN]->(ca:ChemoAdministration)
+                RETURN ca.cycle_number AS cycle_number,
+                       ca.regimen AS regimen,
+                       ca.date AS date,
+                       ca.admin_id AS admin_id,
+                       rel.evidence_id AS evidence_id,
+                       rel.confidence AS confidence
+                ORDER BY ca.cycle_number ASC
+                """,
+                patient_id=patient_id,
+            )
+            cycles = [dict(rec) for rec in admin_records]
+
+            # Get treatment plan
+            plan_records = session.run(
+                """
+                MATCH (p:Patient {patient_id: $patient_id})-[:HAS_REPORT]->(r:Report)-[rel:HAS_TREATMENT_PLAN]->(tp:TreatmentPlan)
+                RETURN tp.regimen AS regimen,
+                       tp.planned_cycles AS planned_cycles,
+                       tp.confidence_note AS confidence_note,
+                       rel.evidence_id AS evidence_id,
+                       rel.confidence AS confidence
+                """,
+                patient_id=patient_id,
+            )
+            plans = [dict(rec) for rec in plan_records]
+
+            if cycles:
+                # Deterministic computation: completed = MAX(cycle_number)
+                max_cycle = max(c["cycle_number"] for c in cycles if c.get("cycle_number") and c["cycle_number"] > 0)
+                regimen = cycles[0].get("regimen", "chemotherapy")
+                cycle_dates = [f"Cycle {c['cycle_number']} on {c.get('date', 'undated')}" for c in cycles if c.get("cycle_number", 0) > 0]
+
+                if plans:
+                    planned = plans[0].get("planned_cycles", -1)
+                    if planned and planned > 0:
+                        remaining = planned - max_cycle
+                        fact_text = (
+                            f"[PRE-COMPUTED] Chemotherapy cycle status for {regimen}: "
+                            f"Completed {max_cycle} of {planned} planned cycles. "
+                            f"{remaining} cycle(s) remaining. "
+                            f"Cycle history: {'; '.join(cycle_dates)}."
+                        )
+                    else:
+                        fact_text = (
+                            f"[PRE-COMPUTED] Chemotherapy cycle status for {regimen}: "
+                            f"Completed {max_cycle} cycle(s). "
+                            f"Planned total cycles not found in records. "
+                            f"Cycle history: {'; '.join(cycle_dates)}."
+                        )
+                else:
+                    fact_text = (
+                        f"[PRE-COMPUTED] Chemotherapy cycle status for {regimen}: "
+                        f"Completed {max_cycle} cycle(s). "
+                        f"Planned total cycles not found in records. "
+                        f"Cycle history: {'; '.join(cycle_dates)}."
+                    )
+
+                results.append({
+                    "text": fact_text,
+                    "patient_id": patient_id,
+                    "evidence_id": cycles[0].get("evidence_id", ""),
+                    "confidence": float(cycles[0].get("confidence") or 0.9),
+                    "is_precomputed": True,
+                })
+            else:
+                results.append({
+                    "text": "[PRE-COMPUTED] No chemotherapy cycle administration records found in the graph.",
+                    "patient_id": patient_id,
+                    "evidence_id": "",
+                    "confidence": 1.0,
+                    "is_precomputed": True,
+                })
+    finally:
+        if should_close_driver and driver is not None:
+            driver.close()
+
+    return results
+
+
+def get_suggested_vs_performed(
+    patient_id: str,
+    driver=None,
+) -> List[Dict[str, Any]]:
+    """
+    Deterministic set-difference: suggested tests vs performed tests.
+    Answers: "what tests were suggested", "pending tests", "which tests done"
+    """
+    should_close_driver = False
+    if driver is None:
+        driver = get_driver()
+        should_close_driver = True
+
+    results: List[Dict[str, Any]] = []
+    try:
+        with driver.session() as session:
+            # Get all suggested tests
+            suggested_recs = session.run(
+                """
+                MATCH (p:Patient {patient_id: $patient_id})-[:HAS_REPORT]->(r:Report)-[rel:SUGGESTS_TEST]->(t)
+                RETURN t.canonical_name AS test_name,
+                       labels(t)[0] AS test_type,
+                       rel.date AS suggested_date,
+                       r.report_date AS report_date,
+                       rel.evidence_id AS evidence_id
+                ORDER BY rel.date ASC
+                """,
+                patient_id=patient_id,
+            )
+            suggested = {rec["test_name"]: dict(rec) for rec in suggested_recs if rec.get("test_name")}
+
+            # Get all performed tests (those with actual results)
+            performed_recs = session.run(
+                """
+                MATCH (p:Patient {patient_id: $patient_id})-[:HAS_REPORT]->(r:Report)-[:HAS_RESULT]->(lr:LabResult)-[:OF_TEST]->(lt:LabTest)
+                RETURN DISTINCT lt.canonical_name AS test_name
+                """,
+                patient_id=patient_id,
+            )
+            performed_set = {rec["test_name"] for rec in performed_recs if rec.get("test_name")}
+
+            # Also check procedures that were undergone
+            undergone_recs = session.run(
+                """
+                MATCH (p:Patient {patient_id: $patient_id})-[:UNDERWENT]->(pr:Procedure)
+                RETURN DISTINCT pr.canonical_name AS test_name
+                """,
+                patient_id=patient_id,
+            )
+            undergone_set = {rec["test_name"] for rec in undergone_recs if rec.get("test_name")}
+            all_performed = performed_set | undergone_set
+
+            # Deterministic set-difference
+            suggested_names = set(suggested.keys())
+            pending = suggested_names - all_performed
+            completed = suggested_names & all_performed
+
+            ev_id = next(iter(suggested.values()), {}).get("evidence_id", "") if suggested else ""
+
+            fact_text = (
+                f"[PRE-COMPUTED] Suggested vs Performed Tests:\n"
+                f"Suggested tests: {', '.join(sorted(suggested_names)) if suggested_names else 'None found in records'}.\n"
+                f"Performed/completed: {', '.join(sorted(completed)) if completed else 'None'}.\n"
+                f"Pending (suggested but not yet performed): {', '.join(sorted(pending)) if pending else 'All suggested tests have been performed'}."
+            )
+
+            results.append({
+                "text": fact_text,
+                "patient_id": patient_id,
+                "evidence_id": ev_id,
+                "confidence": 0.9,
+                "is_precomputed": True,
+            })
+    finally:
+        if should_close_driver and driver is not None:
+            driver.close()
+
+    return results
+
+
+def get_improvement_trend(
+    patient_id: str,
+    test_name: str = None,
+    driver=None,
+) -> List[Dict[str, Any]]:
+    """
+    Deterministic improvement assessment using abnormal_flag comparison.
+    Compares first vs last lab values and flags in Python.
+    Answers: "am I improving", "getting better", "health progress"
+    """
+    should_close_driver = False
+    if driver is None:
+        driver = get_driver()
+        should_close_driver = True
+
+    results: List[Dict[str, Any]] = []
+    try:
+        with driver.session() as session:
+            # Get all lab results ordered by date, optionally filtered by test
+            query = """
+            MATCH (p:Patient {patient_id: $patient_id})-[:HAS_REPORT]->(r:Report)-[rel1:HAS_RESULT]->(lr:LabResult)-[rel2:OF_TEST]->(lt:LabTest)
+            WHERE $test_name IS NULL OR toLower(lt.canonical_name) CONTAINS toLower($test_name)
+            RETURN lt.canonical_name AS test_name,
+                   lr.value AS value,
+                   lr.unit AS unit,
+                   lr.abnormal_flag AS abnormal_flag,
+                   coalesce(lr.result_date, lr.date, r.report_date) AS date,
+                   rel1.evidence_id AS evidence_id,
+                   rel1.confidence AS confidence
+            ORDER BY lt.canonical_name, date ASC
+            """
+            records = session.run(query, patient_id=patient_id, test_name=test_name)
+            all_results = [dict(rec) for rec in records]
+
+            if not all_results:
+                results.append({
+                    "text": f"[PRE-COMPUTED] No lab results found{' for ' + test_name if test_name else ''} to assess improvement.",
+                    "patient_id": patient_id,
+                    "evidence_id": "",
+                    "confidence": 1.0,
+                    "is_precomputed": True,
+                })
+            else:
+                # Group by test name
+                from collections import defaultdict
+                by_test = defaultdict(list)
+                for r in all_results:
+                    by_test[r["test_name"]].append(r)
+
+                trend_summaries = []
+                for tname, values in by_test.items():
+                    if len(values) < 2:
+                        continue
+                    first = values[0]
+                    last = values[-1]
+                    first_flag = first.get("abnormal_flag", "")
+                    last_flag = last.get("abnormal_flag", "")
+                    first_val = first.get("value", "?")
+                    last_val = last.get("value", "?")
+                    first_date = first.get("date", "?")
+                    last_date = last.get("date", "?")
+                    unit = first.get("unit", "")
+                    unit_str = f" {unit}" if unit else ""
+
+                    # Determine trend direction
+                    if first_flag == "low" and last_flag == "normal":
+                        direction = "IMPROVING (was low, now normal)"
+                    elif first_flag == "high" and last_flag == "normal":
+                        direction = "IMPROVING (was high, now normal)"
+                    elif first_flag == "normal" and last_flag in ("high", "low"):
+                        direction = "WORSENING (was normal, now " + last_flag + ")"
+                    elif first_flag == last_flag:
+                        direction = "STABLE (" + (last_flag or "normal") + ")"
+                    else:
+                        direction = f"CHANGED ({first_flag or 'unknown'} → {last_flag or 'unknown'})"
+
+                    trend_summaries.append(
+                        f"{tname}: {first_val}{unit_str} ({first_flag or 'N/A'}) on {first_date} → "
+                        f"{last_val}{unit_str} ({last_flag or 'N/A'}) on {last_date}. Trend: {direction}."
+                    )
+
+                if trend_summaries:
+                    fact_text = "[PRE-COMPUTED] Lab Trend Assessment:\n" + "\n".join(trend_summaries)
+                else:
+                    fact_text = "[PRE-COMPUTED] Not enough data points (need at least 2 values per test) to determine improvement trend."
+
+                results.append({
+                    "text": fact_text,
+                    "patient_id": patient_id,
+                    "evidence_id": all_results[0].get("evidence_id", ""),
+                    "confidence": float(all_results[0].get("confidence") or 0.9),
+                    "is_precomputed": True,
+                })
+    finally:
+        if should_close_driver and driver is not None:
+            driver.close()
+
+    return results
+
+
+def get_specific_lab_value(
+    patient_id: str,
+    test_name: str,
+    target_date: str = None,
+    driver=None,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieves specific lab value(s), optionally filtered to a date/period.
+    Answers: "sugar level in March", "hemoglobin on [date]"
+    """
+    should_close_driver = False
+    if driver is None:
+        driver = get_driver()
+        should_close_driver = True
+
+    # Canonicalize the test name to match graph nodes
+    canonical_test = canonicalize_lab_name(test_name) if test_name else test_name
+
+    results: List[Dict[str, Any]] = []
+    try:
+        with driver.session() as session:
+            query = """
+            MATCH (p:Patient {patient_id: $patient_id})-[:HAS_REPORT]->(r:Report)-[rel1:HAS_RESULT]->(lr:LabResult)-[rel2:OF_TEST]->(lt:LabTest)
+            WHERE toLower(lt.canonical_name) CONTAINS toLower($test_name)
+            RETURN lt.canonical_name AS test_name,
+                   lr.value AS value,
+                   lr.unit AS unit,
+                   lr.abnormal_flag AS abnormal_flag,
+                   coalesce(lr.result_date, lr.date, r.report_date) AS date,
+                   rel1.evidence_id AS evidence_id,
+                   rel1.confidence AS confidence
+            ORDER BY date ASC
+            """
+            records = session.run(query, patient_id=patient_id, test_name=canonical_test or "")
+            all_results = [dict(rec) for rec in records]
+
+            # Filter by target date/period if provided
+            if target_date and all_results:
+                filtered = [r for r in all_results if target_date.lower() in str(r.get("date", "")).lower()]
+                if filtered:
+                    all_results = filtered
+
+            for rec in all_results:
+                t_name = rec.get("test_name", "")
+                val = rec.get("value", "")
+                unit = rec.get("unit", "")
+                flag = rec.get("abnormal_flag", "")
+                dt = rec.get("date", "Unknown date")
+                unit_str = f" {unit}" if unit else ""
+                flag_str = f" ({flag})" if flag else ""
+                fact_text = f"[PRE-COMPUTED] {t_name}: {val}{unit_str}{flag_str} on {dt}"
+                results.append({
+                    "text": fact_text,
+                    "patient_id": patient_id,
+                    "evidence_id": rec.get("evidence_id", ""),
+                    "confidence": float(rec.get("confidence") or 0.9),
+                    "is_precomputed": True,
+                })
+    finally:
+        if should_close_driver and driver is not None:
+            driver.close()
+
+    return results
+
+
 def classify_intent(question: str) -> str:
     """
     Classifies question intent into one of:
+    - "chemo_cycle_status"
+    - "suggested_vs_performed"
+    - "improvement_trend"
+    - "specific_lab_value"
     - "lab_trend"
     - "diagnosis_list"
     - "medication_history"
@@ -313,6 +663,32 @@ def classify_intent(question: str) -> str:
     - "open_ended"
     """
     q_lower = question.lower()
+
+    # --- New deterministic intents (checked FIRST, before general ones) ---
+
+    # Chemo cycle status: "how many cycles", "remaining cycles", "completed chemo"
+    if (any(k in q_lower for k in ["chemo", "chemotherapy", "cycle", "round"]) and
+        any(k in q_lower for k in ["remain", "left", "complete", "many", "count", "next"])):
+        return "chemo_cycle_status"
+
+    # Suggested vs performed tests: "suggested tests", "pending tests"
+    if (("suggested" in q_lower or "advised" in q_lower or "ordered" in q_lower) and
+        ("test" in q_lower or "perform" in q_lower or "done" in q_lower or "pending" in q_lower)):
+        return "suggested_vs_performed"
+
+    # Improvement trend: "am I improving", "getting better", "improvements in my health"
+    if any(k in q_lower for k in ["improving", "improvement", "better", "worse", "progress"]):
+        if any(k in q_lower for k in ["health", "condition", "status", "test", "lab", "hemoglobin", "sugar", "creatinine"]):
+            return "improvement_trend"
+
+    # Specific lab value at a time: "sugar level", "hemoglobin on", "creatinine in"
+    if "trend" not in q_lower and any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
+        "sugar", "glucose", "creatinine", "hemoglobin", "platelet", "bilirubin", "blood sugar"
+    ]):
+        if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in ["level", "reading", "value", "status"]) or re.search(r"\b(?:on|in|at)\s+\d", q_lower):
+            return "specific_lab_value"
+
+    # --- Original intents ---
 
     # Diagnoses patterns (checked early for diagnosis-specific inquiries)
     if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
@@ -349,6 +725,10 @@ def classify_intent(question: str) -> str:
     # LLM classification fallback for ambiguous questions
     prompt = (
         f"Classify the following medical question into exactly ONE of these categories:\n"
+        f"- chemo_cycle_status\n"
+        f"- suggested_vs_performed\n"
+        f"- improvement_trend\n"
+        f"- specific_lab_value\n"
         f"- lab_trend\n"
         f"- diagnosis_list\n"
         f"- medication_history\n"
@@ -359,7 +739,11 @@ def classify_intent(question: str) -> str:
     )
     try:
         resp = chat([{"role": "user", "content": prompt}], task="inference").strip().lower()
-        valid_intents = {"lab_trend", "diagnosis_list", "medication_history", "staging_biomarker", "open_ended"}
+        valid_intents = {
+            "chemo_cycle_status", "suggested_vs_performed", "improvement_trend",
+            "specific_lab_value", "lab_trend", "diagnosis_list",
+            "medication_history", "staging_biomarker", "open_ended",
+        }
         for valid in valid_intents:
             if valid in resp:
                 return valid
@@ -386,15 +770,17 @@ def open_ended_query(
     schema_description = """
     Nodes:
     - Patient {patient_id, display_label}
-    - Report {report_id, patient_id, report_type, report_date}
+    - Report {report_id, patient_id, report_type, report_date, comparison_text, compared_to_ref}
     - Diagnosis {canonical_name}
     - Procedure {canonical_name}
     - Medication {canonical_name}
     - Regimen {canonical_name}
     - LabTest {canonical_name}
-    - LabResult {value, unit, date}
+    - LabResult {value, unit, date, result_date, abnormal_flag}
     - Staging {t, n, m, date}
     - Biomarker {marker, value, date}
+    - ChemoAdministration {admin_id, cycle_number, date, regimen, medications}
+    - TreatmentPlan {plan_id, regimen, planned_cycles, confidence_note}
     Relationships:
     - (p:Patient)-[:HAS_REPORT]->(r:Report)
     - (r:Report)-[rel:STATES_DIAGNOSIS]->(d:Diagnosis)
@@ -405,6 +791,9 @@ def open_ended_query(
     - (r:Report)-[rel1:HAS_RESULT]->(lr:LabResult)-[rel2:OF_TEST]->(lt:LabTest)
     - (r:Report)-[rel:HAS_STAGING]->(st:Staging)
     - (r:Report)-[rel:HAS_BIOMARKER]->(b:Biomarker)
+    - (r:Report)-[rel:SUGGESTS_TEST {date}]->(lt:LabTest or pr:Procedure)
+    - (r:Report)-[rel:HAS_CHEMO_ADMIN]->(ca:ChemoAdministration)
+    - (r:Report)-[rel:HAS_TREATMENT_PLAN]->(tp:TreatmentPlan)
     Every relationship carries 'evidence_id' and 'confidence'.
     """
 
@@ -481,7 +870,43 @@ def retrieve(
     try:
         # Loop per patient_id (SRS FR-6.2.4)
         for p_id in patient_ids:
-            if intent == "lab_trend":
+            if intent == "chemo_cycle_status":
+                facts = get_chemo_cycle_status(patient_id=p_id, driver=driver)
+                all_facts.extend(facts)
+
+            elif intent == "suggested_vs_performed":
+                facts = get_suggested_vs_performed(patient_id=p_id, driver=driver)
+                all_facts.extend(facts)
+
+            elif intent == "improvement_trend":
+                # Extract optional test name
+                test_match = None
+                for candidate in ["hemoglobin", "platelet", "creatinine", "sgot", "sgpt", "bilirubin", "sugar", "wbc"]:
+                    if candidate in question.lower():
+                        test_match = candidate
+                        break
+                facts = get_improvement_trend(patient_id=p_id, test_name=test_match, driver=driver)
+                all_facts.extend(facts)
+
+            elif intent == "specific_lab_value":
+                # Extract test name and date hints
+                test_match = "Random Blood Sugar"  # default for sugar queries
+                for candidate_name, canonical in [("hemoglobin", "Hemoglobin"), ("platelet", "Platelet Count"),
+                                                   ("creatinine", "Serum Creatinine"), ("sugar", "Random Blood Sugar"),
+                                                   ("glucose", "Random Blood Sugar"), ("sgot", "SGOT (AST)"),
+                                                   ("sgpt", "SGPT (ALT)")]:
+                    if candidate_name in question.lower():
+                        test_match = canonical
+                        break
+                # Try to extract a date/period from the question
+                date_match = None
+                date_patterns = re.findall(r'(\d{4}[-/]\d{1,2}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s*\d{4}|\d{1,2}[-/]\d{4})', question.lower())
+                if date_patterns:
+                    date_match = date_patterns[0]
+                facts = get_specific_lab_value(patient_id=p_id, test_name=test_match, target_date=date_match, driver=driver)
+                all_facts.extend(facts)
+
+            elif intent == "lab_trend":
                 # Extract optional test name from question if present
                 test_match = None
                 for candidate in ["hemoglobin", "platelet", "creatinine", "sgot", "sgpt", "bilirubin"]:

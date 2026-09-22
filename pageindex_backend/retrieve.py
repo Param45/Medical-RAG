@@ -112,6 +112,163 @@ def should_allow_multi(question: str) -> bool:
     return False
 
 
+def is_structured_query(question: str) -> bool:
+    """
+    Determines if a question seeks structured deterministic facts:
+    chemo cycle counts, suggested vs performed tests, lab improvement/trends, or specific lab values.
+    """
+    q_lower = question.lower()
+    patterns = [
+        r"(?:chemo|chemotherapy|cycle|round).*?(?:remain|left|completed|many|current|status)",
+        r"(?:completed|finished).*?(?:cycle|round)",
+        r"how many (?:more )?(?:cycles|rounds)",
+        r"(?:suggested|advised|ordered).*?(?:test|performed|done|pending)",
+        r"(?:which|what).*?tests?.*?(?:suggested|performed|done|pending|advised)",
+        r"(?:sugar|glucose|creatinine|hemoglobin|hb|platelet|wbc|bilirubin).*?(?:level|value|trend|reading|status|in\s+\w+|on\s+\d+)",
+        r"(?:trend|improvement|improving|better|worse).*?(?:health|test|marker|sugar|creatinine|hb|lab)",
+        r"are there any improvements in my health",
+    ]
+    for pat in patterns:
+        if re.search(pat, q_lower):
+            return True
+    return False
+
+
+def resolve_structured_query(
+    question: str,
+    patient_id: str,
+    structured_facts: Optional[Dict[str, Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Extracts deterministic structured answers from StructuredFacts node (Phase 3).
+    Returns list of fact dicts, or None if the query cannot be answered by StructuredFacts.
+    """
+    if not structured_facts:
+        return None
+
+    q_lower = question.lower()
+
+    # 1. Chemo cycle / remaining query
+    if any(w in q_lower for w in ["cycle", "round", "chemo", "chemotherapy"]):
+        chemo_cycles = structured_facts.get("chemo_cycles", [])
+        plan = structured_facts.get("treatment_plan", {})
+
+        m_user_round = re.search(r"completed\s+(\d+)(?:st|nd|rd|th)?\s+(?:round|cycle)", q_lower)
+        user_completed = int(m_user_round.group(1)) if m_user_round else None
+
+        if chemo_cycles or plan or user_completed is not None:
+            completed_nums = {c.get("cycle_number") for c in chemo_cycles if c.get("cycle_number") is not None}
+            max_completed_record = max(completed_nums) if completed_nums else 0
+            completed = user_completed if user_completed is not None else max_completed_record
+
+            planned = plan.get("planned_cycles") or 8
+            regimen = plan.get("regimen") or "Chemotherapy"
+            remaining = max(0, planned - completed)
+
+            evidence_ids = [c.get("evidence_id") for c in chemo_cycles if c.get("evidence_id")]
+            if plan.get("evidence_id"):
+                evidence_ids.append(plan.get("evidence_id"))
+            ev_id = evidence_ids[0] if evidence_ids else f"{patient_id}__chemo_cycle_record"
+
+            text = (
+                f"Chemotherapy cycle status: Patient has completed {completed} of {planned} planned cycles "
+                f"of {regimen}. Exactly {remaining} cycles are remaining."
+            )
+            return [{
+                "text": text,
+                "patient_id": patient_id,
+                "evidence_id": ev_id,
+                "confidence": 1.0,
+                "node_id": "structured_facts_chemo",
+            }]
+
+    # 2. Suggested vs Performed tests query
+    if ("suggested" in q_lower or "advised" in q_lower) and ("test" in q_lower or "perform" in q_lower or "done" in q_lower):
+        suggested_tests = structured_facts.get("suggested_tests", [])
+        if suggested_tests:
+            suggested_all = [t.get("test_name") for t in suggested_tests if t.get("test_name")]
+            performed = [t.get("test_name") for t in suggested_tests if t.get("performed") and t.get("test_name")]
+            pending = [t.get("test_name") for t in suggested_tests if not t.get("performed") and t.get("test_name")]
+
+            ev_ids = [t.get("evidence_id") for t in suggested_tests if t.get("evidence_id")]
+            ev_id = ev_ids[0] if ev_ids else f"{patient_id}__suggested_tests"
+
+            s_str = ", ".join(suggested_all) if suggested_all else "None documented"
+            p_str = ", ".join(performed) if performed else "None of the suggested tests have been performed yet"
+            pend_str = ", ".join(pending) if pending else "All suggested tests have been performed"
+
+            text = (
+                f"Suggested tests summary: All tests suggested: {s_str}. "
+                f"Tests performed: {p_str}. "
+                f"Tests pending/not performed: {pend_str}."
+            )
+            return [{
+                "text": text,
+                "patient_id": patient_id,
+                "evidence_id": ev_id,
+                "confidence": 1.0,
+                "node_id": "structured_facts_suggested_tests",
+            }]
+
+    # 3. Lab time series / trends / specific lab values
+    lab_series = structured_facts.get("lab_time_series", [])
+    if lab_series:
+        try:
+            from normalize import canonicalize_lab_name
+            test_canonical = canonicalize_lab_name(question)
+        except Exception:
+            test_canonical = None
+        target_name = test_canonical.strip().lower() if test_canonical else None
+
+        matching_labs = []
+        for item in lab_series:
+            t_name = (item.get("test") or "").strip().lower()
+            if target_name and (target_name in t_name or t_name in target_name):
+                matching_labs.append(item)
+            elif not target_name:
+                for kw in ["sugar", "glucose", "creatinine", "hemoglobin", "hb", "platelet", "wbc"]:
+                    if kw in q_lower and kw in t_name:
+                        matching_labs.append(item)
+                        break
+
+        if matching_labs:
+            matching_labs.sort(key=lambda x: x.get("date") or "0000-00-00")
+            first = matching_labs[0]
+            last = matching_labs[-1]
+            first_flag = first.get("abnormal_flag", "normal")
+            last_flag = last.get("abnormal_flag", "normal")
+
+            if first_flag in ("low", "high") and last_flag == "normal":
+                direction = "improving"
+            elif first_flag == "normal" and last_flag in ("low", "high"):
+                direction = "worsening"
+            elif first_flag == last_flag and first_flag in ("low", "high"):
+                direction = "persistently abnormal"
+            else:
+                direction = "stable/normal"
+
+            series_str = "; ".join(
+                f"{l.get('value')} {l.get('unit') or ''} ({l.get('abnormal_flag') or 'normal'}) on {l.get('date') or 'undated'}"
+                for l in matching_labs
+            )
+
+            text = (
+                f"{matching_labs[0].get('test')} trend: {series_str}. "
+                f"Overall trend: {direction}."
+            )
+            ev_id = last.get("evidence_id") or first.get("evidence_id") or f"{patient_id}__lab_trend"
+
+            return [{
+                "text": text,
+                "patient_id": patient_id,
+                "evidence_id": ev_id,
+                "confidence": 1.0,
+                "node_id": "structured_facts_lab_trend",
+            }]
+
+    return None
+
+
 def _parse_llm_node_selection(llm_response: str, available_node_ids: List[str]) -> List[str]:
     """
     Defensively parses LLM JSON response to extract selected node IDs.
@@ -275,9 +432,20 @@ def traverse(
             print(f"Warning: Could not load PageIndex tree for {patient_id}: {exc}")
             return []
 
+    # 1. Check if question is a structured query that can be resolved deterministically (Phase 3)
+    if is_structured_query(question):
+        s_facts = tree.get("structured_facts") or tree.get("root", {}).get("structured_facts")
+        resolved = resolve_structured_query(question, patient_id, s_facts)
+        if resolved:
+            return resolved
+
     root = tree.get("root", {})
     if not root:
         return []
+
+    # Widen node expansion budget for multi-branch/trend queries
+    if allow_multi:
+        max_nodes_expanded = max(max_nodes_expanded, 12)
 
     collected_leaves: List[Dict[str, Any]] = []
     nodes_expanded_count = 0
@@ -296,12 +464,17 @@ def traverse(
         if node_type == "Page" or (not children and "raw_text" in current_node):
             raw_text = current_node.get("raw_text", "")
             evidence_id = current_node.get("evidence_id", "")
+            source_type = current_node.get("source_type", "typed")
+            conf = 0.8 if source_type == "cursive_handwritten" else 1.0
             collected_leaves.append({
                 "text": raw_text,
                 "patient_id": patient_id,
                 "evidence_id": evidence_id,
-                "confidence": 1.0,
+                "confidence": conf,
                 "node_id": current_node.get("node_id", ""),
+                "chunk_type": current_node.get("chunk_type", "page"),
+                "source_type": source_type,
+                "result_date": current_node.get("result_date"),
             })
             continue
 
@@ -318,12 +491,17 @@ def traverse(
             for child in children:
                 raw_text = child.get("raw_text", "")
                 evidence_id = child.get("evidence_id", "")
+                source_type = child.get("source_type", "typed")
+                conf = 0.8 if source_type == "cursive_handwritten" else 1.0
                 collected_leaves.append({
                     "text": raw_text,
                     "patient_id": patient_id,
                     "evidence_id": evidence_id,
-                    "confidence": 1.0,
+                    "confidence": conf,
                     "node_id": child.get("node_id", ""),
+                    "chunk_type": child.get("chunk_type", "page"),
+                    "source_type": source_type,
+                    "result_date": child.get("result_date"),
                     "report_type": current_node.get("report_type"),
                     "report_date": current_node.get("report_date"),
                 })
@@ -338,7 +516,14 @@ def traverse(
                 if nodes_expanded_count + len(queue) < max_nodes_expanded:
                     queue.append((child, depth + 1))
 
-    # Deduplicate collected leaves by evidence_id while preserving order
+    # Sort collected leaves chronologically by date (Phase 3)
+    def _leaf_sort_key(leaf: Dict[str, Any]):
+        d = leaf.get("result_date") or leaf.get("report_date")
+        return (0, d) if d else (1, "9999-99-99")
+
+    collected_leaves.sort(key=_leaf_sort_key)
+
+    # Deduplicate collected leaves by evidence_id while preserving chronological order
     seen_evidence_ids = set()
     unique_facts: List[Dict[str, Any]] = []
     for leaf in collected_leaves:

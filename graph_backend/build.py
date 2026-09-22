@@ -32,6 +32,7 @@ load_dotenv()
 
 from patients import all_patient_ids, get_display_label
 from llm_client import chat
+from normalize import canonicalize_lab_name, compute_abnormal_flag
 
 
 def get_driver():
@@ -146,6 +147,20 @@ def run_schema_init(driver=None, schema_path: Optional[Path | str] = None) -> Li
     return executed_statements
 
 
+# ---------- Fixed schema validation sets ----------
+# Any LLM-extracted triple whose node/relation type isn't here gets rejected and logged.
+VALID_NODE_LABELS = {
+    "Patient", "Report", "Diagnosis", "Procedure", "Medication", "Regimen",
+    "LabTest", "LabResult", "Staging", "Biomarker",
+    "ChemoAdministration", "TreatmentPlan",
+}
+VALID_RELATION_TYPES = {
+    "STATES_DIAGNOSIS", "UNDERWENT", "ADMINISTERED", "CONTAINS",
+    "HAS_RESULT", "OF_TEST", "HAS_STAGING", "HAS_BIOMARKER",
+    "SUGGESTS_TEST", "HAS_CHEMO_ADMIN", "HAS_TREATMENT_PLAN", "COMPARED_TO",
+}
+
+
 EXTRACTION_SYSTEM_PROMPT = """You are an expert clinical oncology knowledge graph extraction assistant.
 Your task is to extract structured medical entities and relationships from clinical report text into a strict knowledge graph schema.
 
@@ -157,9 +172,11 @@ ALLOWED NODE LABELS:
 - Medication: {canonical_name} (e.g., 'Paclitaxel', 'Trastuzumab', 'Doxorubicin')
 - Regimen: {canonical_name} (e.g., 'AC Regimen', 'Docetaxel-Cyclophosphamide')
 - LabTest: {canonical_name} (e.g., 'Hemoglobin', 'Platelet Count', 'Serum Creatinine', 'SGOT', 'SGPT')
-- LabResult: {value, unit, date}
+- LabResult: {value, unit, date, result_date}
 - Staging: {t, n, m, date}
 - Biomarker: {marker, value, date} (e.g., marker='ER', value='8/8' or marker='HER2', value='3+')
+- ChemoAdministration: {cycle_number, date, regimen, medications}
+- TreatmentPlan: {regimen, planned_cycles, confidence_note}
 
 ALLOWED RELATIONSHIPS:
 - (Report)-[:STATES_DIAGNOSIS]->(Diagnosis)
@@ -170,6 +187,19 @@ ALLOWED RELATIONSHIPS:
 - (Report)-[:HAS_RESULT]->(LabResult)  [and (LabResult)-[:OF_TEST]->(LabTest)]
 - (Report)-[:HAS_STAGING]->(Staging)
 - (Report)-[:HAS_BIOMARKER]->(Biomarker)
+- (Report)-[:SUGGESTS_TEST {date}]->(LabTest or Procedure)  — for tests that were SUGGESTED/ADVISED but not necessarily performed. Look for language like "advised", "to be done", "kept for", "plan for", "suggested", "recommended".
+- (Report)-[:HAS_CHEMO_ADMIN]->(ChemoAdministration)  — for explicit chemotherapy cycle administrations with cycle numbers. Extract cycle_number from CYCLE/DAY fields or mentions like "Cycle 3", "C3D1", "#3".
+- (Report)-[:HAS_TREATMENT_PLAN]->(TreatmentPlan)  — for treatment plans mentioning total planned cycles, e.g., "4EC → 4T", "plan: EC #4", "6 cycles of AC". Extract planned_cycles as a number.
+- (Report)-[:COMPARED_TO {comparison_text}]->(Report)  — for radiology reports that state comparison with a previous scan, e.g., "as compared to previous scan dated...", "no significant change compared to prior study". Capture the comparison statement verbatim.
+
+SPECIAL INSTRUCTIONS FOR SUGGESTED TESTS:
+When text says a test was "advised", "to be done", "suggested", "recommended", "planned", or "kept for", extract it as SUGGESTS_TEST (not HAS_RESULT). Only extract HAS_RESULT when the test was actually PERFORMED and a result value exists.
+
+SPECIAL INSTRUCTIONS FOR CHEMO CYCLES:
+When text contains cycle information ("Cycle 3", "C3D1", "CYCLE/DAY: 3/1", "#3"), extract a ChemoAdministration with an explicit cycle_number integer. Do NOT make the LLM count or infer cycle numbers — only extract what is explicitly stated.
+
+SPECIAL INSTRUCTIONS FOR LAB RESULTS:
+Include result_date in properties if a specific date for the result is available (distinct from the report date). This is especially important for flowsheet tables where each column has its own date.
 
 INSTRUCTIONS:
 1. Extract ONLY facts explicitly stated in the chunk text and pre-normalized entities.
@@ -180,8 +210,8 @@ INSTRUCTIONS:
   {
     "subject_label": "Report" | "Patient" | "Regimen" | "LabResult",
     "subject_name": "...",
-    "relation": "STATES_DIAGNOSIS" | "UNDERWENT" | "ADMINISTERED" | "CONTAINS" | "HAS_RESULT" | "HAS_STAGING" | "HAS_BIOMARKER",
-    "object_label": "Diagnosis" | "Procedure" | "Medication" | "Regimen" | "LabResult" | "Staging" | "Biomarker",
+    "relation": "STATES_DIAGNOSIS" | "UNDERWENT" | "ADMINISTERED" | "CONTAINS" | "HAS_RESULT" | "HAS_STAGING" | "HAS_BIOMARKER" | "SUGGESTS_TEST" | "HAS_CHEMO_ADMIN" | "HAS_TREATMENT_PLAN" | "COMPARED_TO",
+    "object_label": "Diagnosis" | "Procedure" | "Medication" | "Regimen" | "LabResult" | "Staging" | "Biomarker" | "ChemoAdministration" | "TreatmentPlan" | "LabTest" | "Report",
     "object_name": "...",
     "properties": { ... }
   }
@@ -196,7 +226,7 @@ def extract_triples(
 ) -> List[Dict[str, Any]]:
     """
     Extracts structured knowledge graph triples from a chunk using the LLM (SRS §6.1.3).
-    Constrained strictly to the schema in SRS §12.1.
+    Constrained strictly to the fixed schema. Rejects any triple with off-schema labels/relations.
     """
     patient_id = report_meta.get("patient_id", "patient")
     report_id = report_meta.get("report_id", "report")
@@ -242,24 +272,29 @@ def extract_triples(
         if not isinstance(parsed, list):
             return []
 
-        # Validate triple structure
+        # Schema validation: reject any triple with off-schema labels/relations
         valid_triples = []
-        valid_relations = {
-            "STATES_DIAGNOSIS",
-            "UNDERWENT",
-            "ADMINISTERED",
-            "CONTAINS",
-            "HAS_RESULT",
-            "OF_TEST",
-            "HAS_STAGING",
-            "HAS_BIOMARKER",
-        }
         for item in parsed:
             if not isinstance(item, dict):
                 continue
             relation = item.get("relation", "")
-            if relation in valid_relations:
-                valid_triples.append(item)
+            subject_label = item.get("subject_label", "")
+            object_label = item.get("object_label", "")
+
+            # Reject off-schema relations
+            if relation not in VALID_RELATION_TYPES:
+                print(f"  [SCHEMA] Rejected off-schema relation '{relation}' in {report_id}")
+                continue
+
+            # Reject off-schema node labels (warn but don't crash)
+            if subject_label and subject_label not in VALID_NODE_LABELS:
+                print(f"  [SCHEMA] Rejected off-schema subject label '{subject_label}' in {report_id}")
+                continue
+            if object_label and object_label not in VALID_NODE_LABELS:
+                print(f"  [SCHEMA] Rejected off-schema object label '{object_label}' in {report_id}")
+                continue
+
+            valid_triples.append(item)
 
         return valid_triples
 
@@ -279,6 +314,8 @@ def write_triples_to_neo4j(
     """
     Writes extracted triples to Neo4j using idempotent Cypher MERGE statements (SRS §6.1.4).
     Attaches evidence_id and confidence to every relationship.
+    Canonicalizes lab/medication names before MERGE to prevent duplicate nodes.
+    Computes abnormal_flag on LabResult nodes against static reference ranges.
     """
     raw_report_id = report_meta.get("report_id", "")
     # Scope report_id per patient to guarantee partition isolation
@@ -340,7 +377,8 @@ def write_triples_to_neo4j(
                     written_count += 1
 
             elif relation == "UNDERWENT":
-                canonical = str(obj_name).strip()
+                # Canonicalize procedure name
+                canonical = canonicalize_lab_name(str(obj_name).strip())
                 proc_date = props.get("date") or report_date or ""
                 if canonical:
                     session.run(
@@ -361,7 +399,8 @@ def write_triples_to_neo4j(
                     written_count += 1
 
             elif relation == "ADMINISTERED":
-                canonical = str(obj_name).strip()
+                # Canonicalize medication/regimen name
+                canonical = canonicalize_lab_name(str(obj_name).strip())
                 dose = props.get("dose", "")
                 cycle = props.get("cycle", "")
                 if obj_label == "Regimen" or "regimen" in canonical.lower():
@@ -399,8 +438,9 @@ def write_triples_to_neo4j(
                     written_count += 1
 
             elif relation == "CONTAINS":
-                reg_name = str(triple.get("subject_name", "")).strip()
-                med_name = str(obj_name).strip()
+                # Canonicalize both regimen and medication names
+                reg_name = canonicalize_lab_name(str(triple.get("subject_name", "")).strip())
+                med_name = canonicalize_lab_name(str(obj_name).strip())
                 if reg_name and med_name:
                     session.run(
                         """
@@ -417,15 +457,23 @@ def write_triples_to_neo4j(
                     written_count += 1
 
             elif relation == "HAS_RESULT":
-                test_name = str(obj_name or props.get("test_name", "")).strip()
+                # Canonicalize lab test name to prevent duplicate nodes
+                raw_test_name = str(obj_name or props.get("test_name", "")).strip()
+                test_name = canonicalize_lab_name(raw_test_name)
                 val = str(props.get("value", "")).strip()
                 unit = str(props.get("unit", "")).strip()
-                res_date = str(props.get("date") or report_date or "").strip()
+                # Use result_date if available, fall back to date, then report_date
+                res_date = str(props.get("result_date") or props.get("date") or report_date or "").strip()
+
+                # Compute abnormal_flag deterministically against reference ranges
+                abnormal_flag = compute_abnormal_flag(test_name, val) or ""
+
                 if test_name:
                     session.run(
                         """
                         MERGE (r:Report {report_id: $report_id})
-                        CREATE (lr:LabResult {value: $value, unit: $unit, date: $date})
+                        CREATE (lr:LabResult {value: $value, unit: $unit, date: $date,
+                                             result_date: $result_date, abnormal_flag: $abnormal_flag})
                         MERGE (lt:LabTest {canonical_name: $test_name})
                         MERGE (r)-[rel1:HAS_RESULT]->(lr)
                         SET rel1.evidence_id = $evidence_id, rel1.confidence = $confidence
@@ -436,6 +484,8 @@ def write_triples_to_neo4j(
                         value=val,
                         unit=unit,
                         date=res_date,
+                        result_date=res_date,
+                        abnormal_flag=abnormal_flag,
                         test_name=test_name,
                         evidence_id=evidence_id,
                         confidence=confidence,
@@ -483,6 +533,139 @@ def write_triples_to_neo4j(
                     confidence=confidence,
                 )
                 written_count += 1
+
+            elif relation == "SUGGESTS_TEST":
+                # Test was SUGGESTED/ADVISED but not necessarily performed
+                raw_test = str(obj_name).strip()
+                canonical_test = canonicalize_lab_name(raw_test)
+                suggest_date = str(props.get("date") or report_date or "").strip()
+                if canonical_test:
+                    # Determine target node label
+                    if obj_label == "Procedure":
+                        session.run(
+                            """
+                            MERGE (r:Report {report_id: $report_id})
+                            MERGE (pr:Procedure {canonical_name: $canonical_name})
+                            MERGE (r)-[rel:SUGGESTS_TEST]->(pr)
+                            SET rel.date = $date,
+                                rel.evidence_id = $evidence_id,
+                                rel.confidence = $confidence
+                            """,
+                            report_id=report_id,
+                            canonical_name=canonical_test,
+                            date=suggest_date,
+                            evidence_id=evidence_id,
+                            confidence=confidence,
+                        )
+                    else:
+                        session.run(
+                            """
+                            MERGE (r:Report {report_id: $report_id})
+                            MERGE (lt:LabTest {canonical_name: $canonical_name})
+                            MERGE (r)-[rel:SUGGESTS_TEST]->(lt)
+                            SET rel.date = $date,
+                                rel.evidence_id = $evidence_id,
+                                rel.confidence = $confidence
+                            """,
+                            report_id=report_id,
+                            canonical_name=canonical_test,
+                            date=suggest_date,
+                            evidence_id=evidence_id,
+                            confidence=confidence,
+                        )
+                    written_count += 1
+
+            elif relation == "HAS_CHEMO_ADMIN":
+                # Explicit chemotherapy cycle administration with cycle number
+                cycle_number = props.get("cycle_number")
+                chemo_date = str(props.get("date") or report_date or "").strip()
+                regimen_name = canonicalize_lab_name(str(props.get("regimen") or obj_name or "").strip())
+                medications = props.get("medications", [])
+                admin_id = f"{report_id}__chemo_{cycle_number or 'unknown'}_{chemo_date}"
+
+                if cycle_number is not None:
+                    try:
+                        cycle_num_int = int(cycle_number)
+                    except (ValueError, TypeError):
+                        cycle_num_int = -1
+                else:
+                    cycle_num_int = -1
+
+                session.run(
+                    """
+                    MERGE (r:Report {report_id: $report_id})
+                    MERGE (ca:ChemoAdministration {admin_id: $admin_id})
+                    ON CREATE SET ca.cycle_number = $cycle_number,
+                                  ca.date = $date,
+                                  ca.regimen = $regimen,
+                                  ca.medications = $medications
+                    MERGE (r)-[rel:HAS_CHEMO_ADMIN]->(ca)
+                    SET rel.evidence_id = $evidence_id, rel.confidence = $confidence
+                    """,
+                    report_id=report_id,
+                    admin_id=admin_id,
+                    cycle_number=cycle_num_int,
+                    date=chemo_date,
+                    regimen=regimen_name,
+                    medications=medications if isinstance(medications, list) else [str(medications)],
+                    evidence_id=evidence_id,
+                    confidence=confidence,
+                )
+                written_count += 1
+
+            elif relation == "HAS_TREATMENT_PLAN":
+                # Treatment plan with planned cycle count (LLM-extracted from prose)
+                regimen_name = canonicalize_lab_name(str(props.get("regimen") or obj_name or "").strip())
+                planned_cycles = props.get("planned_cycles")
+                confidence_note = str(props.get("confidence_note", "inferred from prose")).strip()
+                plan_id = f"{patient_id}__plan_{regimen_name}"
+
+                if planned_cycles is not None:
+                    try:
+                        planned_int = int(planned_cycles)
+                    except (ValueError, TypeError):
+                        planned_int = -1
+                else:
+                    planned_int = -1
+
+                # Lower confidence since this is inferred from prose, not a structured field
+                plan_confidence = min(confidence, 0.7)
+                session.run(
+                    """
+                    MERGE (r:Report {report_id: $report_id})
+                    MERGE (tp:TreatmentPlan {plan_id: $plan_id})
+                    ON CREATE SET tp.regimen = $regimen,
+                                  tp.planned_cycles = $planned_cycles,
+                                  tp.confidence_note = $confidence_note
+                    MERGE (r)-[rel:HAS_TREATMENT_PLAN]->(tp)
+                    SET rel.evidence_id = $evidence_id, rel.confidence = $confidence
+                    """,
+                    report_id=report_id,
+                    plan_id=plan_id,
+                    regimen=regimen_name,
+                    planned_cycles=planned_int,
+                    confidence_note=confidence_note,
+                    evidence_id=evidence_id,
+                    confidence=plan_confidence,
+                )
+                written_count += 1
+
+            elif relation == "COMPARED_TO":
+                # Radiology comparison between reports
+                comparison_text = str(props.get("comparison_text") or obj_name or "").strip()
+                target_report_ref = str(props.get("target_report") or "").strip()
+                if comparison_text:
+                    session.run(
+                        """
+                        MERGE (r:Report {report_id: $report_id})
+                        SET r.comparison_text = $comparison_text,
+                            r.compared_to_ref = $target_report_ref
+                        """,
+                        report_id=report_id,
+                        comparison_text=comparison_text,
+                        target_report_ref=target_report_ref,
+                    )
+                    written_count += 1
 
     return written_count
 

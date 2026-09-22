@@ -55,6 +55,40 @@ class Chunk:
         )
 
 
+def _extract_row_date(row: Any, fallback_date: Optional[str] = None) -> Optional[str]:
+    """
+    Extract a per-row date from a flowsheet table row.
+
+    Flowsheet rows (as dicts) often have a 'date', 'Date', 'CYCLE/DAY', or similar
+    field with the actual date of that specific lab/chemo entry. This is distinct
+    from the report header date and critical for "sugar level at a specific time" queries.
+
+    Returns ISO-format date string if found, else fallback_date.
+    """
+    if not isinstance(row, dict):
+        return fallback_date
+
+    # Common date field names in flowsheet tables
+    date_keys = ["date", "Date", "DATE", "CYCLE/DAY", "cycle/day", "Cycle/Day",
+                 "day", "Day", "DAY", "visit_date", "Visit Date"]
+    for key in date_keys:
+        if key in row and row[key]:
+            raw_date = str(row[key]).strip()
+            if raw_date:
+                # Try to normalize via split_reports date extractor
+                try:
+                    from split_reports import extract_report_date
+                    normalized = extract_report_date(raw_date)
+                    if normalized:
+                        return normalized
+                except Exception:
+                    pass
+                # Return raw if normalization fails but value exists
+                return raw_date
+
+    return fallback_date
+
+
 def source_type_for_page(ocr_result: Dict[str, Any]) -> str:
     """
     Map OCR metadata flags (is_table, is_handwritten) to source_type (SRS FR-5.5.4).
@@ -132,6 +166,10 @@ def chunk_report(
             for row_idx, row in enumerate(table_rows):
                 row_text = str(row) if not isinstance(row, dict) else " | ".join(f"{k}: {v}" for k, v in row.items())
                 row_evidence_id = f"{patient_id}__{span.report_id}__page_{page_num}__chunk_{row_idx + 1}"
+
+                # Extract per-row date (distinct from report header date)
+                row_result_date = _extract_row_date(row, fallback_date=span.report_date)
+
                 row_entities = normalize_chunk_text(
                     row_text, script=script, base_confidence=confidence, dict_dir=dict_dir
                 )
@@ -141,6 +179,7 @@ def chunk_report(
                     report_id=span.report_id,
                     report_type=span.report_type,
                     report_date=span.report_date,
+                    result_date=row_result_date,
                     page_number=page_num,
                     raw_text=row_text,
                     source_type=source_type,
@@ -152,7 +191,7 @@ def chunk_report(
                         evidence_record=row_record,
                         normalized_entities=row_entities,
                         chunk_type="row",
-                        metadata={"row_index": row_idx},
+                        metadata={"row_index": row_idx, "result_date": row_result_date},
                     )
                 )
 
@@ -167,6 +206,7 @@ def chunk_report(
                 report_id=span.report_id,
                 report_type=span.report_type,
                 report_date=span.report_date,
+                result_date=span.report_date,  # Summary uses report-level date
                 page_number=page_num,
                 raw_text=raw_text,
                 source_type=source_type,
@@ -192,6 +232,7 @@ def chunk_report(
                 report_id=span.report_id,
                 report_type=span.report_type,
                 report_date=span.report_date,
+                result_date=span.report_date,  # For prose reports, result_date == report_date
                 page_number=page_num,
                 raw_text=raw_text,
                 source_type=source_type,

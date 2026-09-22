@@ -68,6 +68,24 @@ def extract_and_filter_citations(
     return answer_text, found_citations
 
 
+def is_numeric_or_count_query(question: str) -> bool:
+    """
+    Checks if the question targets numerical quantities, counts, cycles, lab values, or specific measurements.
+    """
+    q_lower = question.lower()
+    numeric_patterns = [
+        r"(?:how many|count|number of|remaining|cycle|round)",
+        r"(?:sugar|glucose|creatinine|hemoglobin|hb|platelet|wbc|bilirubin).*?(?:level|value|reading)",
+        r"(?:what was|what were).*?(?:level|value|reading|score)",
+        r"(?:trend|improvement|improving|better|worse)",
+        r"(?:suggested|performed|done|pending).*?(?:test)",
+    ]
+    for pat in numeric_patterns:
+        if re.search(pat, q_lower):
+            return True
+    return False
+
+
 def generate_answer(
     question: str,
     facts: List[Dict[str, Any]],
@@ -119,6 +137,27 @@ def generate_answer(
             "Never blend statements from different patients into one uncited sentence (SRS FR-8.2.3).\n"
         )
 
+    is_numeric = is_numeric_or_count_query(question)
+
+    precomputed_instruction = (
+        "5. PRE-COMPUTED DETERMINISTIC FACTS: When a retrieved fact contains a pre-computed numerical result, "
+        "cycle count, trend direction, or suggested/performed test list (e.g., 'Completed 4 of 8 cycles, 4 remaining' "
+        "or 'Trend: improving'), state that number, count, and trend EXACTLY as provided. "
+        "Do NOT recount, recompute, or verify the arithmetic — the computation has already been done deterministically.\n"
+    )
+
+    if is_numeric:
+        style_instruction = (
+            "6. NUMERIC/COUNT ACCURACY: This question seeks specific numbers, dates, or counts. "
+            "State the exact numbers and dates directly from the facts. Do not hedge, round, or paraphrase specific numbers into vague terms.\n"
+        )
+    else:
+        style_instruction = (
+            "6. PATIENT-FRIENDLY EXPLANATIONS: This tool helps patients understand their medical reports. "
+            "Whenever advanced medical jargon, staging codes, or clinical acronyms appear, explain them in simple, reassuring, "
+            "and easy-to-understand terms for non-experts, while preserving all factual information.\n"
+        )
+
     system_prompt = (
         "You are an expert clinical oncology documentation assistant. "
         "Your task is to answer the user's clinical question using ONLY the provided facts.\n\n"
@@ -130,6 +169,8 @@ def generate_answer(
         "4. If the question appears to ask for clinical advice, disease prognosis, or treatment recommendations, "
         "answer strictly with what is documented in the records and append this standard disclaimer sentence: "
         f"'{MEDICAL_DISCLAIMER}'.\n"
+        f"{precomputed_instruction}"
+        f"{style_instruction}"
         f"{group_structure_instruction}"
     )
 

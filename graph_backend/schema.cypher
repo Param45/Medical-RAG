@@ -5,7 +5,9 @@
 //
 // Node labels with uniqueness constraints:
 //   Patient.patient_id, Diagnosis.canonical_name,
-//   Medication.canonical_name, LabTest.canonical_name
+//   Medication.canonical_name, LabTest.canonical_name,
+//   ChemoAdministration.admin_id, TreatmentPlan.plan_id,
+//   Procedure.canonical_name
 
 CREATE CONSTRAINT patient_id_unique IF NOT EXISTS
 FOR (p:Patient) REQUIRE p.patient_id IS UNIQUE;
@@ -18,3 +20,12 @@ FOR (m:Medication) REQUIRE m.canonical_name IS UNIQUE;
 
 CREATE CONSTRAINT labtest_name_unique IF NOT EXISTS
 FOR (lt:LabTest) REQUIRE lt.canonical_name IS UNIQUE;
+
+CREATE CONSTRAINT procedure_name_unique IF NOT EXISTS
+FOR (pr:Procedure) REQUIRE pr.canonical_name IS UNIQUE;
+
+CREATE CONSTRAINT chemo_admin_id_unique IF NOT EXISTS
+FOR (ca:ChemoAdministration) REQUIRE ca.admin_id IS UNIQUE;
+
+CREATE CONSTRAINT treatment_plan_id_unique IF NOT EXISTS
+FOR (tp:TreatmentPlan) REQUIRE tp.plan_id IS UNIQUE;

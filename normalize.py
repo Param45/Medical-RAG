@@ -96,6 +96,138 @@ def load_normalization_dictionaries(
     return _ONCOLOGY_TERMS, _HINDI_TERMS
 
 
+# Global cache for lab reference ranges
+_LAB_REFERENCE_RANGES: Optional[Dict[str, Dict[str, float]]] = None
+
+
+def load_lab_reference_ranges(
+    dict_dir: Optional[Path] = None,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Load static lab reference ranges from lab_reference_ranges.json.
+    Returns dict: {canonical_test_name: {unit, low, high}}.
+    """
+    global _LAB_REFERENCE_RANGES
+
+    if _LAB_REFERENCE_RANGES is not None and dict_dir is None:
+        return _LAB_REFERENCE_RANGES
+
+    if dict_dir is None:
+        dict_dir = Path(__file__).parent / "data" / "normalization"
+    else:
+        dict_dir = Path(dict_dir)
+
+    ref_file = dict_dir / "lab_reference_ranges.json"
+    ranges: Dict[str, Dict[str, float]] = {}
+    if ref_file.exists():
+        try:
+            data = json.loads(ref_file.read_text(encoding="utf-8"))
+            ranges = {k: v for k, v in data.items() if not k.startswith("_")}
+        except Exception as e:
+            print(f"Warning: Failed to load {ref_file}: {e}")
+
+    _LAB_REFERENCE_RANGES = ranges
+    return _LAB_REFERENCE_RANGES
+
+
+def compute_abnormal_flag(
+    canonical_test_name: str,
+    value_str: str,
+    dict_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """
+    Compute abnormal flag ('high', 'low', 'normal') for a lab result
+    by comparing the numeric value against static reference ranges.
+
+    Returns None if the test name is not in the reference table or
+    the value cannot be parsed as a number.
+    """
+    ranges = load_lab_reference_ranges(dict_dir)
+    ref = ranges.get(canonical_test_name)
+    if ref is None:
+        return None
+
+    # Parse numeric value from string (handle ranges like "8.2-9.0" by taking first number)
+    try:
+        clean_val = str(value_str).strip().replace(",", "")
+        # Handle range values: take the first number
+        if "-" in clean_val and not clean_val.startswith("-"):
+            clean_val = clean_val.split("-")[0].strip()
+        # Remove any trailing non-numeric chars (e.g., "142mg" -> "142")
+        match = re.match(r"^([+-]?\d+\.?\d*)", clean_val)
+        if not match:
+            return None
+        numeric_val = float(match.group(1))
+    except (ValueError, TypeError):
+        return None
+
+    low = float(ref.get("low", 0))
+    high = float(ref.get("high", float("inf")))
+
+    if numeric_val < low:
+        return "low"
+    elif numeric_val > high:
+        return "high"
+    else:
+        return "normal"
+
+
+def _preprocess_term_for_lookup(term: str) -> List[str]:
+    """
+    Pre-process a term to generate candidate lookup forms.
+    Handles compound terms like 'S.CREATININE', 'HB/PCV', etc.
+
+    Returns list of candidate strings to try (in order of preference).
+    """
+    candidates = [term.strip()]
+
+    cleaned = term.strip()
+
+    # Strip leading 'S.' or 'Sr.' prefixes (e.g., 'S.CREATININE' -> 'CREATININE')
+    stripped_prefix = re.sub(r"^(?:S\.|SR\.|SERUM\s+)\s*", "", cleaned, flags=re.IGNORECASE).strip()
+    if stripped_prefix and stripped_prefix.upper() != cleaned.upper():
+        candidates.append(stripped_prefix)
+
+    # Split on '/' and try each part (e.g., 'HB/PCV' -> ['HB', 'PCV'])
+    if "/" in cleaned:
+        parts = [p.strip() for p in cleaned.split("/") if p.strip()]
+        candidates.extend(parts)
+
+    # Strip internal dots (e.g., 'S.CREATININE' -> 'SCREATININE')
+    no_dots = cleaned.replace(".", "").strip()
+    if no_dots and no_dots.upper() != cleaned.upper():
+        candidates.append(no_dots)
+
+    return candidates
+
+
+def canonicalize_lab_name(
+    raw_name: str,
+    dict_dir: Optional[Path] = None,
+) -> str:
+    """
+    Canonicalize a lab test or medication name using the normalization dictionary.
+    This is the primary deduplication function called after LLM extraction
+    to ensure e.g. 'Hb', 'HB/PCV', 'Hemoglobin' all resolve to 'Hemoglobin'.
+
+    Returns the canonical name if found, otherwise returns the input unchanged.
+    """
+    if not raw_name or not raw_name.strip():
+        return raw_name
+
+    oncology_dict, _ = load_normalization_dictionaries(dict_dir)
+
+    # Try all candidate forms
+    candidates = _preprocess_term_for_lookup(raw_name)
+    for candidate in candidates:
+        candidate_upper = candidate.upper()
+        for k, v in oncology_dict.items():
+            if k.upper() == candidate_upper:
+                return v["canonical"]
+
+    return raw_name.strip()
+
+
 def dictionary_match(
     term: str,
     min_similarity: float = 0.85,
@@ -104,25 +236,30 @@ def dictionary_match(
 ) -> Optional[NormalizedEntity]:
     """
     Match a term/phrase against oncology and Hindi dictionaries (SRS §5.4.2 step 1).
-    Supports exact case-insensitive lookup and fuzzy matching.
+    Supports exact case-insensitive lookup, pre-processing of compound terms, and fuzzy matching.
     """
     if not term or not term.strip():
         return None
 
     cleaned_term = term.strip()
-    term_upper = cleaned_term.upper()
     oncology_dict, hindi_dict = load_normalization_dictionaries(dict_dir)
 
-    # 1. Exact match (case-insensitive in oncology terms)
-    for k, v in oncology_dict.items():
-        if k.upper() == term_upper:
-            return NormalizedEntity(
-                raw_text=cleaned_term,
-                normalized_term=v["canonical"],
-                entity_type=v["type"],
-                method="dictionary",
-                confidence=base_confidence,
-            )
+    # Try all candidate forms from pre-processing
+    candidates = _preprocess_term_for_lookup(cleaned_term)
+
+    for candidate in candidates:
+        candidate_upper = candidate.upper()
+
+        # 1. Exact match (case-insensitive in oncology terms)
+        for k, v in oncology_dict.items():
+            if k.upper() == candidate_upper:
+                return NormalizedEntity(
+                    raw_text=cleaned_term,
+                    normalized_term=v["canonical"],
+                    entity_type=v["type"],
+                    method="dictionary",
+                    confidence=base_confidence,
+                )
 
     # 2. Exact match in Hindi terms (exact unicode match)
     if cleaned_term in hindi_dict:
@@ -137,6 +274,7 @@ def dictionary_match(
 
     # 3. Fuzzy matching for multi-character terms (min length 4, not pure numbers, high similarity)
     # 3-letter abbreviations (e.g. LFT, RFT, CBC) must match exactly to avoid false positives with words like 'left'.
+    term_upper = cleaned_term.upper()
     if len(cleaned_term) >= 4 and not cleaned_term.isdigit():
         keys_upper = {k.upper(): k for k in oncology_dict.keys() if len(k) >= 4}
         matches = difflib.get_close_matches(term_upper, keys_upper.keys(), n=1, cutoff=max(min_similarity, 0.88))

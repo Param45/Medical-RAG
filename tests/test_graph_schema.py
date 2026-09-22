@@ -23,13 +23,16 @@ class TestSchemaCypherParsing:
         content = schema_path.read_text(encoding="utf-8")
         statements = parse_cypher_statements(content)
 
-        assert len(statements) == 4, f"Expected 4 constraint statements, got {len(statements)}"
+        assert len(statements) >= 4, f"Expected at least 4 constraint statements, got {len(statements)}"
 
         stmts_text = " ".join(statements)
         assert "p.patient_id IS UNIQUE" in stmts_text
         assert "d.canonical_name IS UNIQUE" in stmts_text
         assert "m.canonical_name IS UNIQUE" in stmts_text
         assert "lt.canonical_name IS UNIQUE" in stmts_text
+        assert "ca.admin_id IS UNIQUE" in stmts_text
+        assert "tp.plan_id IS UNIQUE" in stmts_text
+        assert "pr.canonical_name IS UNIQUE" in stmts_text
 
     def test_parse_cypher_statements_strips_comments(self):
         raw_cypher = """
