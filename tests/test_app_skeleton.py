@@ -52,3 +52,5 @@ class TestAppSidebarResolution:
         assert resolve_backend("Graph") == "graph"
         assert resolve_backend("PageIndex") == "pageindex"
         assert resolve_backend("PageIndex (Tree)") == "pageindex"
+        assert resolve_backend("Compare both Backends") == "both"
+        assert resolve_backend("both") == "both"

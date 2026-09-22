@@ -99,9 +99,12 @@ def resolve_selected_patients(
 
 def resolve_backend(backend_label: str) -> str:
     """
-    Maps UI radio option to backend code identifier ('graph' or 'pageindex').
+    Maps UI backend selection to code identifier ('graph', 'pageindex', or 'both').
     """
-    if "graph" in backend_label.lower():
+    lbl = backend_label.lower()
+    if "both" in lbl or "compare" in lbl:
+        return "both"
+    if "graph" in lbl:
         return "graph"
     return "pageindex"
 
@@ -204,23 +207,9 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
 
     st.sidebar.markdown("---")
 
-    # 3. Backend toggle
-    backend_choice = st.sidebar.radio(
-        "Backend",
-        options=["GraphRAG (Neo4j)", "PageIndex"],
-        index=0,
-        help="GraphRAG queries structured Neo4j knowledge graph. PageIndex traverses hierarchical document tree via LLM reasoning.",
-    )
-    backend = resolve_backend(backend_choice)
-
-    # 4. Optional 'Compare both backends' checkbox
-    compare_both = st.sidebar.checkbox(
-        "Compare both backends",
-        value=False,
-        help="Executes queries simultaneously across both GraphRAG and PageIndex for side-by-side comparison.",
-    )
-
-    st.sidebar.markdown("---")
+    # Backend mode is fixed to dual comparison across both engines
+    backend = "both"
+    compare_both = True
 
     # Clear chat affordance
     if st.sidebar.button("Clear Chat History", use_container_width=True):
@@ -233,7 +222,7 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
     st.sidebar.markdown(
         f"**Patients:** `{', '.join(get_display_label(p) for p in selected_patients) if selected_patients else 'None'}`"
     )
-    st.sidebar.markdown(f"**Backend:** `{'GraphRAG + PageIndex' if compare_both else backend_choice}`")
+    st.sidebar.markdown("**Backend:** `Compare both Backends`")
 
     return mode, selected_patients, backend, compare_both
 
@@ -386,8 +375,8 @@ def execute_query(
     question: str,
     mode: str,
     selected_patients: List[str],
-    backend: str,
-    compare_both: bool,
+    backend: str = "both",
+    compare_both: bool = True,
 ) -> None:
     """
     Executes user query through orchestrate.answer_question, manages UI spinners,
@@ -461,25 +450,15 @@ def execute_query(
 def render_chat_interface(
     mode: str,
     selected_patients: List[str],
-    backend: str,
-    compare_both: bool,
+    backend: str = "both",
+    compare_both: bool = True,
 ) -> None:
     """
     Renders the chat history, sample query buttons, and active chat input (SRS FR-9.1.2).
     """
-    # Render existing conversation history or prompt suggestions
-    if not st.session_state.messages:
-        st.info("**Clinical Question Suggestions across Domains:**")
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            st.markdown("- **Diagnoses & History**: *What primary illnesses or medical conditions are documented?*")
-            st.markdown("- **Lab Trends & Vitals**: *What are the latest Hemoglobin, Creatinine, and Blood Sugar values?*")
-        with col_s2:
-            st.markdown("- **Medications & Therapy**: *What medications or treatment regimens were administered?*")
-            st.markdown("- **Tests & Diagnostics**: *What diagnostic procedures or scans were performed or advised?*")
-    else:
-        for msg in st.session_state.messages:
-            render_message_content(msg)
+    # Render existing conversation history
+    for msg in st.session_state.messages:
+        render_message_content(msg)
 
     # Chat Input Box
     prompt = st.chat_input("Ask a clinical question about the medical records...")
@@ -686,15 +665,12 @@ def main():
         "clinical flowsheets, imaging studies, and discharge summaries with **verifiable citation evidence**."
     )
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         st.metric(label="Active Mode", value=mode)
     with col2:
         patient_str = ", ".join(get_display_label(p) for p in selected_patients) if selected_patients else "None"
         st.metric(label="Scoped Patient(s)", value=patient_str)
-    with col3:
-        backend_str = "Both (Comparison)" if compare_both else ("GraphRAG (Neo4j)" if backend == "graph" else "PageIndex (Tree)")
-        st.metric(label="Active Engine", value=backend_str)
 
     st.markdown("---")
 

@@ -128,3 +128,23 @@ class TestChatInterfaceWiring:
 
         mock_streamlit.error.assert_called_once()
         assert "Database connection timeout" in str(mock_streamlit.error.call_args)
+
+    @patch("app.answer_question")
+    def test_execute_query_default_compare_both(self, mock_answer, mock_streamlit):
+        init_session_state()
+        mock_answer.side_effect = [
+            {"answer": "Graph answer", "citations": [], "backend_used": "graph"},
+            {"answer": "PageIndex answer", "citations": [], "backend_used": "pageindex"},
+        ]
+
+        execute_query(
+            question="What is my condition?",
+            mode="Individual",
+            selected_patients=["patient_a"],
+        )
+
+        assert mock_answer.call_count == 2
+        messages = mock_streamlit.session_state.messages
+        assert len(messages) == 2
+        assert messages[1]["is_comparison"] is True
+
