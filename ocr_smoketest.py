@@ -313,7 +313,7 @@ def save_ocr_artifacts(image: np.ndarray, output: dict, base_name: str):
     cv2.imwrite(str(boxes_path), annotated)
 
     print("\n" + "-" * 70)
-    print("📁 SAVED ARTIFACTS FOR VERIFICATION:")
+    print("SAVED ARTIFACTS FOR VERIFICATION:")
     print(f"  • Page Image:    {img_path}")
     print(f"  • Full Text:     {txt_path}")
     print(f"  • JSON Data:     {json_path}")

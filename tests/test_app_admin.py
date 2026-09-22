@@ -115,7 +115,7 @@ def test_render_admin_tab_rebuild_success(
 
     mock_rebuild.assert_called_once()
     status_mock.update.assert_called_once_with(
-        label="✅ Pipeline Rebuild Completed in 12.34s!",
+        label="Pipeline Rebuild Completed in 12.34s!",
         state="complete",
         expanded=True,
     )
@@ -159,7 +159,7 @@ def test_render_admin_tab_rebuild_error_handling(
 
     mock_rebuild.assert_called_once()
     status_mock.update.assert_called_once_with(
-        label="❌ Pipeline Rebuild Failed",
+        label="Pipeline Rebuild Failed",
         state="error",
         expanded=True,
     )

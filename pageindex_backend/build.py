@@ -532,9 +532,9 @@ def build_all_pageindexes(
             len(r.get("children", [])) for r in tree.get("root", {}).get("children", [])
         )
 
-        print(f"  ✓ Saved tree to {saved_path} in {dt:.1f}s")
-        print(f"  ✓ Root summary: {tree.get('root', {}).get('summary')[:100]}...")
-        print(f"  ✓ Reports: {report_count}, Pages/Leaves: {total_pages}")
+        print(f"  [OK] Saved tree to {saved_path} in {dt:.1f}s")
+        print(f"  [OK] Root summary: {tree.get('root', {}).get('summary')[:100]}...")
+        print(f"  [OK] Reports: {report_count}, Pages/Leaves: {total_pages}")
         results[pid] = tree
 
     total_time = time.time() - start_time

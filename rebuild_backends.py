@@ -25,7 +25,7 @@ from pageindex_backend.build import build_all_pageindexes
 
 def wipe_neo4j():
     """Wipes all nodes and relationships from the Neo4j database."""
-    print("\n[1/4] 🧹 Wiping Neo4j Knowledge Graph...")
+    print("\n[1/4] Wiping Neo4j Knowledge Graph...")
     driver = get_driver()
     try:
         with driver.session() as session:
@@ -36,21 +36,21 @@ def wipe_neo4j():
             print(f"      Found {count_before} nodes in Neo4j. Deleting...")
 
             session.run("MATCH (n) DETACH DELETE n")
-            print("      ✓ Neo4j database successfully wiped clean.")
+            print("      [OK] Neo4j database successfully wiped clean.")
     finally:
         driver.close()
 
 
 def wipe_pageindex():
     """Deletes existing PageIndex tree JSON files."""
-    print("\n[2/4] 🧹 Wiping PageIndex local cache...")
+    print("\n[2/4] Wiping PageIndex local cache...")
     pageindex_dir = _ROOT / "data" / "pageindex"
     if pageindex_dir.exists():
         deleted = 0
         for f in pageindex_dir.glob("*.json"):
             f.unlink()
             deleted += 1
-        print(f"      ✓ Deleted {deleted} PageIndex JSON file(s) from {pageindex_dir}.")
+        print(f"      [OK] Deleted {deleted} PageIndex JSON file(s) from {pageindex_dir}.")
     else:
         pageindex_dir.mkdir(parents=True, exist_ok=True)
         print(f"      Created directory {pageindex_dir}.")
@@ -58,7 +58,7 @@ def wipe_pageindex():
 
 def rebuild_graph():
     """Rebuilds the Neo4j Knowledge Graph from existing chunks."""
-    print("\n[3/4] 🏗️  Rebuilding GraphRAG (Neo4j)...")
+    print("\n[3/4] Rebuilding GraphRAG (Neo4j)...")
     t0 = time.time()
     driver = get_driver()
     try:
@@ -66,17 +66,17 @@ def rebuild_graph():
     finally:
         driver.close()
     dt = round(time.time() - t0, 2)
-    print(f"      ✓ GraphRAG build completed in {dt}s.")
+    print(f"      [OK] GraphRAG build completed in {dt}s.")
     return stats
 
 
 def rebuild_pageindex():
     """Rebuilds the PageIndex trees from existing reports/chunks."""
-    print("\n[4/4] 🏗️  Rebuilding PageIndex Trees...")
+    print("\n[4/4] Rebuilding PageIndex Trees...")
     t0 = time.time()
     results = build_all_pageindexes()
     dt = round(time.time() - t0, 2)
-    print(f"      ✓ PageIndex build completed in {dt}s.")
+    print(f"      [OK] PageIndex build completed in {dt}s.")
     return results
 
 
@@ -100,7 +100,7 @@ def main():
 
     total_elapsed = round(time.time() - total_start, 2)
     print("\n" + "=" * 70)
-    print(f"🎉 ALL BACKENDS SUCCESSFULLY WIPED AND REBUILT IN {total_elapsed}s!")
+    print(f"ALL BACKENDS SUCCESSFULLY WIPED AND REBUILT IN {total_elapsed}s!")
     print("=" * 70)
 
 

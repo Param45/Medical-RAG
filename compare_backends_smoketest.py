@@ -72,7 +72,7 @@ def run_comparison():
         try:
             graph_facts = graph_retrieve(question=q, patient_ids=p_ids)
             dt_graph = time.time() - t0
-            print(f"  ✓ Retrieved {len(graph_facts)} fact(s) in {dt_graph:.2f}s")
+            print(f"  [PASS] Retrieved {len(graph_facts)} fact(s) in {dt_graph:.2f}s")
             for idx, fact in enumerate(graph_facts[:4], 1):
                 ev = fact.get("evidence_id", "N/A")
                 conf = fact.get("confidence", 1.0)
@@ -82,7 +82,7 @@ def run_comparison():
             if len(graph_facts) > 4:
                 print(f"      ... and {len(graph_facts) - 4} more facts")
         except Exception as exc:
-            print(f"  ✗ GraphRAG retrieval failed: {exc}")
+            print(f"  [FAIL] GraphRAG retrieval failed: {exc}")
             graph_facts = []
 
         # Rate limit pacing
@@ -94,7 +94,7 @@ def run_comparison():
         try:
             pageindex_facts = pageindex_retrieve(question=q, patient_ids=p_ids)
             dt_pi = time.time() - t1
-            print(f"  ✓ Retrieved {len(pageindex_facts)} fact(s) in {dt_pi:.2f}s")
+            print(f"  [PASS] Retrieved {len(pageindex_facts)} fact(s) in {dt_pi:.2f}s")
             for idx, fact in enumerate(pageindex_facts[:3], 1):
                 ev = fact.get("evidence_id", "N/A")
                 rep_type = fact.get("report_type", "REPORT")
@@ -105,7 +105,7 @@ def run_comparison():
             if len(pageindex_facts) > 3:
                 print(f"      ... and {len(pageindex_facts) - 3} more pages")
         except Exception as exc:
-            print(f"  ✗ PageIndex retrieval failed: {exc}")
+            print(f"  [FAIL] PageIndex retrieval failed: {exc}")
             pageindex_facts = []
 
         # Rate limit pacing between questions

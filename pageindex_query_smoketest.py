@@ -60,7 +60,7 @@ def run_smoketest():
 
         try:
             facts = retrieve(question=q, patient_ids=p_ids)
-            print(f"  ✓ Retrieved {len(facts)} fact(s)")
+            print(f"  [PASS] Retrieved {len(facts)} fact(s)")
             for f_idx, fact in enumerate(facts[:3], 1):
                 p_id = fact.get("patient_id")
                 ev_id = fact.get("evidence_id")
@@ -71,7 +71,7 @@ def run_smoketest():
                 print(f"      Evidence ID: {ev_id}")
                 print(f"      Text: {text_preview}...")
         except Exception as exc:
-            print(f"  ✗ Retrieval failed: {exc}")
+            print(f"  [FAIL] Retrieval failed: {exc}")
 
     print("\n" + "=" * 70)
     print("PageIndex retrieval smoke test completed.")

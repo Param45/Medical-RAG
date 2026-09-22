@@ -49,6 +49,12 @@ def get_label_to_id_mapping() -> Dict[str, str]:
     return {label: pid for pid, label in PATIENTS.items()}
 
 
+def get_chat_avatar(role: str) -> str:
+    """Returns clean non-emoji Material Symbol avatar for chat messages."""
+    return ":material/person:" if role == "user" else ":material/smart_toy:"
+
+
+
 def resolve_selected_patients(
     mode: str,
     selected_label_or_labels: Any,
@@ -154,7 +160,7 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
     Returns:
         Tuple of (mode, selected_patients, backend, compare_both).
     """
-    st.sidebar.title("🏥 Medical Records RAG")
+    st.sidebar.title("Medical Records RAG")
     st.sidebar.caption("Clinical Document Intelligence & Evidence Explorer")
     st.sidebar.markdown("---")
 
@@ -222,7 +228,7 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
         st.rerun()
 
     # Scope Summary Badge in Sidebar
-    st.sidebar.markdown("### 📋 Active Scope")
+    st.sidebar.markdown("### Active Scope")
     st.sidebar.markdown(f"**Mode:** `{mode}`")
     st.sidebar.markdown(
         f"**Patients:** `{', '.join(get_display_label(p) for p in selected_patients) if selected_patients else 'None'}`"
@@ -262,84 +268,6 @@ def strip_evidence_brackets(line: str) -> str:
     return EVIDENCE_BRACKET_REGEX.sub("", line).rstrip()
 
 
-def render_evidence_popover_content(evidence_ids: List[str]) -> None:
-    """
-    Renders detailed evidence in a compact, attached popover container (SRS §9.1.3):
-    - Metadata summary (Report Type, Date, Page, Source Type)
-    - Confidence badge
-    - Raw OCR text tab
-    - Original page scan image tab
-    """
-    for idx, ev_id in enumerate(evidence_ids):
-        if idx > 0:
-            st.markdown("---")
-
-        st.markdown(f"**Evidence ID:** `{ev_id}`")
-        patient_id = parse_patient_id_from_evidence_id(ev_id)
-        record: Optional[EvidenceRecord] = None
-        if patient_id:
-            record = get_evidence_by_id(patient_id=patient_id, evidence_id=ev_id)
-
-        if record is None:
-            st.warning(f"⚠️ Evidence record `{ev_id}` not found in evidence store.")
-            continue
-
-        # Metadata banner
-        st.markdown(f"**Report Type:** `{record.report_type}` | **Page:** `{record.page_number}`")
-        st.markdown(f"**Date:** `{record.report_date or 'Undated'}` | **Source:** `{record.source_type}`")
-        st.markdown(f"**Confidence:** {get_confidence_badge_markdown(record.confidence)}")
-
-        # Dual Evidence Tabs: Raw OCR vs Scanned Image
-        tab_raw, tab_image = st.tabs(["📝 Raw OCR Text", "🖼️ Original Scan"])
-
-        with tab_raw:
-            st.caption("Verbatim extracted OCR text:")
-            st.code(record.raw_text, language=None)
-
-        with tab_image:
-            image_rel_path = record.page_image_path
-            image_abs_path = _ROOT_DIR / image_rel_path if image_rel_path else None
-
-            if image_abs_path and image_abs_path.exists():
-                st.image(
-                    str(image_abs_path),
-                    caption=f"{get_display_label(record.patient_id)} — Report {record.report_id} (Page {record.page_number})",
-                    use_container_width=True,
-                )
-            else:
-                st.info(f"Page scan image not found on disk at: `{image_rel_path}`")
-
-
-def render_answer_with_evidence_popovers(answer_text: str) -> None:
-    """
-    Renders an answer where citation brackets [patient_id__...] are replaced by
-    an interactive [📄 Evidence] button / popover next to each backed point (SRS §9.1.3).
-    Clicking the button opens an attached pop-up box with source details without covering the screen.
-    """
-    if not answer_text:
-        st.markdown("No response generated.")
-        return
-
-    lines = answer_text.splitlines()
-    for line in lines:
-        if not line.strip():
-            st.write("")
-            continue
-
-        cits = extract_evidence_ids_from_line(line)
-        if cits:
-            cleaned_line = strip_evidence_brackets(line)
-            col_text, col_btn = st.columns([0.82, 0.18])
-            with col_text:
-                st.markdown(cleaned_line)
-            with col_btn:
-                btn_label = f"📄 Evidence ({len(cits)})" if len(cits) > 1 else "📄 Evidence"
-                with st.popover(btn_label, use_container_width=True):
-                    render_evidence_popover_content(cits)
-        else:
-            st.markdown(line)
-
-
 def render_evidence_expander(evidence_id: str) -> None:
     """
     Renders an interactive evidence expander displaying the source page image,
@@ -350,9 +278,9 @@ def render_evidence_expander(evidence_id: str) -> None:
     if patient_id:
         record = get_evidence_by_id(patient_id=patient_id, evidence_id=evidence_id)
 
-    with st.expander(f"📄 Source Evidence: `{evidence_id}`", expanded=False):
+    with st.expander(f"Source Evidence: `{evidence_id}`", expanded=False):
         if record is None:
-            st.warning(f"⚠️ Evidence record `{evidence_id}` could not be found in the local evidence store.")
+            st.warning(f"Evidence record `{evidence_id}` could not be found in the local evidence store.")
             return
 
         # Top Metadata Banner
@@ -371,7 +299,7 @@ def render_evidence_expander(evidence_id: str) -> None:
         st.markdown("---")
 
         # Evidence Tabs: Raw OCR Text vs Source Page Scan
-        tab_raw, tab_image = st.tabs(["📝 Raw OCR Text", "🖼️ Original Page Scan"])
+        tab_raw, tab_image = st.tabs(["Raw OCR Text", "Original Page Scan"])
 
         with tab_raw:
             st.caption("Verbatim extracted text from source document (no paraphrasing):")
@@ -398,7 +326,7 @@ def render_citations_list(citations: List[str]) -> None:
     if not citations:
         return
 
-    st.markdown(f"##### 🔍 Source Evidence Trail ({len(citations)} item{'s' if len(citations) > 1 else ''})")
+    st.markdown(f"##### Source Evidence Trail ({len(citations)} item{'s' if len(citations) > 1 else ''})")
     for ev_id in citations:
         render_evidence_expander(ev_id)
 
@@ -410,11 +338,11 @@ def render_citations_list(citations: List[str]) -> None:
 def render_message_content(msg: Dict[str, Any]) -> None:
     """
     Renders an individual message from history, handling both single-backend
-    and dual-backend comparison layouts along with interactive evidence popovers.
+    and dual-backend comparison layouts.
     """
     role = msg.get("role", "user")
 
-    with st.chat_message(role):
+    with st.chat_message(role, avatar=get_chat_avatar(role)):
         if role == "user":
             st.markdown(msg.get("content", ""))
             return
@@ -425,23 +353,33 @@ def render_message_content(msg: Dict[str, Any]) -> None:
             graph_res = msg.get("graph_result", {})
             pi_res = msg.get("pageindex_result", {})
 
-            st.markdown("#### ⚖️ Side-by-Side Backend Comparison")
+            st.markdown("#### Side-by-Side Backend Comparison")
             col1, col2 = st.columns(2)
 
             with col1:
-                st.markdown("##### 🕸️ GraphRAG (Neo4j)")
-                render_answer_with_evidence_popovers(graph_res.get("answer", "No response generated."))
+                st.markdown("##### GraphRAG (Neo4j)")
+                st.markdown(graph_res.get("answer", "No response generated."))
+                citations_g = graph_res.get("citations", [])
+                if citations_g:
+                    st.caption(f"Citations ({len(citations_g)}): {', '.join(f'`{c}`' for c in citations_g)}")
 
             with col2:
-                st.markdown("##### 🌲 PageIndex (Tree Traversal)")
-                render_answer_with_evidence_popovers(pi_res.get("answer", "No response generated."))
+                st.markdown("##### PageIndex (Tree Traversal)")
+                st.markdown(pi_res.get("answer", "No response generated."))
+                citations_pi = pi_res.get("citations", [])
+                if citations_pi:
+                    st.caption(f"Citations ({len(citations_pi)}): {', '.join(f'`{c}`' for c in citations_pi)}")
 
         else:
             # Single Backend Layout
             backend_used = msg.get("backend_used", "engine")
             backend_label = "GraphRAG (Neo4j)" if backend_used == "graph" else "PageIndex (Tree)"
-            st.caption(f"⚙️ Generated via **{backend_label}**")
-            render_answer_with_evidence_popovers(msg.get("content", ""))
+            st.caption(f"Generated via **{backend_label}**")
+            st.markdown(msg.get("content", ""))
+
+            citations = msg.get("citations", [])
+            if citations:
+                st.caption(f"Citations ({len(citations)}): {', '.join(f'`{c}`' for c in citations)}")
 
 
 def execute_query(
@@ -456,17 +394,17 @@ def execute_query(
     and records results in session state (SRS FR-9.1.2).
     """
     if not selected_patients:
-        st.warning("⚠️ Please select at least one patient in the sidebar before asking a question.")
+        st.warning("Please select at least one patient in the sidebar before asking a question.")
         return
 
     # 1. Append and display user message
     user_msg = {"role": "user", "content": question}
     st.session_state.messages.append(user_msg)
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar=get_chat_avatar("user")):
         st.markdown(question)
 
     # 2. Execute retrieval & answer generation
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar=get_chat_avatar("assistant")):
         try:
             if compare_both:
                 with st.spinner("Analyzing records with both GraphRAG and PageIndex engines..."):
@@ -517,7 +455,7 @@ def execute_query(
                 render_message_content(assistant_msg)
 
         except Exception as exc:
-            st.error(f"❌ An error occurred during retrieval or answer generation: {exc}")
+            st.error(f"An error occurred during retrieval or answer generation: {exc}")
 
 
 def render_chat_interface(
@@ -531,14 +469,14 @@ def render_chat_interface(
     """
     # Render existing conversation history or prompt suggestions
     if not st.session_state.messages:
-        st.info("💡 **Clinical Question Suggestions across Domains:**")
+        st.info("**Clinical Question Suggestions across Domains:**")
         col_s1, col_s2 = st.columns(2)
         with col_s1:
-            st.markdown("- 🩺 **Diagnoses & History**: *What primary illnesses or medical conditions are documented?*")
-            st.markdown("- 🩸 **Lab Trends & Vitals**: *What are the latest Hemoglobin, Creatinine, and Blood Sugar values?*")
+            st.markdown("- **Diagnoses & History**: *What primary illnesses or medical conditions are documented?*")
+            st.markdown("- **Lab Trends & Vitals**: *What are the latest Hemoglobin, Creatinine, and Blood Sugar values?*")
         with col_s2:
-            st.markdown("- 💊 **Medications & Therapy**: *What medications or treatment regimens were administered?*")
-            st.markdown("- 🔬 **Tests & Diagnostics**: *What diagnostic procedures or scans were performed or advised?*")
+            st.markdown("- **Medications & Therapy**: *What medications or treatment regimens were administered?*")
+            st.markdown("- **Tests & Diagnostics**: *What diagnostic procedures or scans were performed or advised?*")
     else:
         for msg in st.session_state.messages:
             render_message_content(msg)
@@ -649,7 +587,7 @@ def render_admin_tab() -> None:
     """
     Renders the Administrator management tab with one-click pipeline rebuild (SRS FR-9.2.1).
     """
-    st.markdown("### ⚙️ System Administration & Index Management")
+    st.markdown("### System Administration & Index Management")
     st.markdown(
         "Manage the underlying index stores and trigger complete end-to-end data pipeline rebuilds. "
         "Rebuilding re-processes all raw PDFs in `data/raw/`, refreshes OCR extraction, resets chunking & evidence stores, "
@@ -661,14 +599,14 @@ def render_admin_tab() -> None:
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        st.markdown("#### 🔄 Full Pipeline Rebuild")
+        st.markdown("#### Full Pipeline Rebuild")
         st.caption(
-            "This will sequentially execute all pipeline stages: Ingestion ➔ OCR ➔ Report Splitting ➔ "
-            "Chunking ➔ GraphRAG (Neo4j) ➔ PageIndex Tree."
+            "This will sequentially execute all pipeline stages: Ingestion -> OCR -> Report Splitting -> "
+            "Chunking -> GraphRAG (Neo4j) -> PageIndex Tree."
         )
 
         rebuild_btn = st.button(
-            "🚀 Rebuild Index from data/raw/",
+            "Rebuild Index from data/raw/",
             type="primary",
             use_container_width=True,
             help="Re-runs all pipeline stages end-to-end for all patients.",
@@ -679,14 +617,14 @@ def render_admin_tab() -> None:
             try:
                 summary = execute_full_rebuild(progress_callback=status_container.write)
                 status_container.update(
-                    label=f"✅ Pipeline Rebuild Completed in {summary['elapsed_seconds']}s!",
+                    label=f"Pipeline Rebuild Completed in {summary['elapsed_seconds']}s!",
                     state="complete",
                     expanded=True,
                 )
-                st.toast("✅ Index rebuilt successfully for all patients!", icon="🎉")
+                st.toast("Index rebuilt successfully for all patients!")
 
                 # Display summary table
-                st.markdown("#### 📊 Rebuild Execution Summary")
+                st.markdown("#### Rebuild Execution Summary")
                 summary_rows = []
                 for pid, pdata in summary["patients"].items():
                     summary_rows.append({
@@ -703,19 +641,19 @@ def render_admin_tab() -> None:
 
             except Exception as exc:
                 status_container.update(
-                    label="❌ Pipeline Rebuild Failed",
+                    label="Pipeline Rebuild Failed",
                     state="error",
                     expanded=True,
                 )
-                st.error(f"❌ An error occurred during index rebuilding: {exc}")
+                st.error(f"An error occurred during index rebuilding: {exc}")
 
     with col2:
-        st.markdown("#### 📁 Local Index Status")
+        st.markdown("#### Local Index Status")
         for pid in all_patient_ids():
             label = get_display_label(pid)
             ev_list = load_evidence(pid)
             pi_file = _ROOT_DIR / "data" / "pageindex" / f"{pid}.json"
-            pi_exists = "✅ Available" if pi_file.exists() else "❌ Missing"
+            pi_exists = "Available" if pi_file.exists() else "Missing"
 
             st.markdown(f"**{label}** (`{pid}`)")
             st.markdown(f"- Evidence Records: `{len(ev_list)}`")
@@ -731,7 +669,6 @@ def main():
     # Page configuration
     st.set_page_config(
         page_title="Medical Records RAG (Demo)",
-        page_icon="🏥",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -762,7 +699,7 @@ def main():
     st.markdown("---")
 
     # Main Application Navigation: Chat Interface vs Admin Management (Task 5.4)
-    tab_chat, tab_admin = st.tabs(["💬 Clinical Chat", "⚙️ Admin"])
+    tab_chat, tab_admin = st.tabs(["Clinical Chat", "Admin"])
 
     with tab_chat:
         render_chat_interface(
