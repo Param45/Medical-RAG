@@ -61,7 +61,7 @@ def generate_report_summary(
     truncated_text = cleaned_text[:12000]
 
     system_prompt = (
-        "You are an expert clinical oncology documentation summarizer. "
+        "You are an expert clinical documentation summarizer. "
         "Summarize the given clinical report into 2 to 4 concise, factual sentences. "
         "Highlight primary diagnoses, procedures, key lab/pathology values, biomarker status, "
         "or clinical findings documented in the text. "
@@ -122,8 +122,8 @@ def generate_root_summary(
     system_prompt = (
         "You are an expert clinical summarizer. Summarize the patient's complete medical history "
         "into a concise 3 to 5 sentence clinical overview based on the provided report summaries. "
-        "Synthesize primary diagnoses, staging/biomarkers, surgical and medical oncology treatments "
-        "(chemotherapy, surgeries), imaging trends, and current disease status. "
+        "Synthesize primary diagnoses, active medical conditions, key diagnostic/laboratory findings, "
+        "surgical and medical treatments (medications, procedures, therapies), imaging trends, and current clinical status. "
         "Do not invent details not present in the report summaries."
     )
 

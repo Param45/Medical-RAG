@@ -27,5 +27,8 @@ FOR (pr:Procedure) REQUIRE pr.canonical_name IS UNIQUE;
 CREATE CONSTRAINT chemo_admin_id_unique IF NOT EXISTS
 FOR (ca:ChemoAdministration) REQUIRE ca.admin_id IS UNIQUE;
 
+CREATE CONSTRAINT med_admin_id_unique IF NOT EXISTS
+FOR (ma:MedicationAdministration) REQUIRE ma.admin_id IS UNIQUE;
+
 CREATE CONSTRAINT treatment_plan_id_unique IF NOT EXISTS
 FOR (tp:TreatmentPlan) REQUIRE tp.plan_id IS UNIQUE;

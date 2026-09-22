@@ -52,6 +52,7 @@ class NormalizedEntity:
 
 
 # Global dictionary caches
+_MEDICAL_TERMS: Optional[Dict[str, Dict[str, str]]] = None
 _ONCOLOGY_TERMS: Optional[Dict[str, Dict[str, str]]] = None
 _HINDI_TERMS: Optional[Dict[str, Dict[str, str]]] = None
 
@@ -60,28 +61,41 @@ def load_normalization_dictionaries(
     dict_dir: Optional[Path] = None
 ) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]]:
     """
-    Load oncology and Hindi abbreviation dictionaries from JSON files.
+    Load medical/oncology and Hindi abbreviation dictionaries from JSON files.
+    Merges medical_terms.json and oncology_terms.json to ensure full coverage
+    for all general medical specialties as well as oncology.
     """
-    global _ONCOLOGY_TERMS, _HINDI_TERMS
+    global _MEDICAL_TERMS, _ONCOLOGY_TERMS, _HINDI_TERMS
 
-    if _ONCOLOGY_TERMS is not None and _HINDI_TERMS is not None and dict_dir is None:
-        return _ONCOLOGY_TERMS, _HINDI_TERMS
+    if _MEDICAL_TERMS is not None and _HINDI_TERMS is not None and dict_dir is None:
+        return _MEDICAL_TERMS, _HINDI_TERMS
 
     if dict_dir is None:
         dict_dir = Path(__file__).parent / "data" / "normalization"
     else:
         dict_dir = Path(dict_dir)
 
+    medical_file = dict_dir / "medical_terms.json"
     oncology_file = dict_dir / "oncology_terms.json"
     hindi_file = dict_dir / "hindi_terms.json"
 
-    oncology_dict: Dict[str, Dict[str, str]] = {}
+    medical_dict: Dict[str, Dict[str, str]] = {}
+
+    # 1. Load oncology_terms if present (baseline)
     if oncology_file.exists():
         try:
             data = json.loads(oncology_file.read_text(encoding="utf-8"))
-            oncology_dict = {k: v for k, v in data.items() if not k.startswith("_")}
+            medical_dict.update({k: v for k, v in data.items() if not k.startswith("_")})
         except Exception as e:
             print(f"Warning: Failed to load {oncology_file}: {e}")
+
+    # 2. Overlay / expand with medical_terms if present
+    if medical_file.exists():
+        try:
+            data = json.loads(medical_file.read_text(encoding="utf-8"))
+            medical_dict.update({k: v for k, v in data.items() if not k.startswith("_")})
+        except Exception as e:
+            print(f"Warning: Failed to load {medical_file}: {e}")
 
     hindi_dict: Dict[str, Dict[str, str]] = {}
     if hindi_file.exists():
@@ -91,9 +105,10 @@ def load_normalization_dictionaries(
         except Exception as e:
             print(f"Warning: Failed to load {hindi_file}: {e}")
 
-    _ONCOLOGY_TERMS = oncology_dict
+    _MEDICAL_TERMS = medical_dict
+    _ONCOLOGY_TERMS = medical_dict  # Preserve backward compatibility
     _HINDI_TERMS = hindi_dict
-    return _ONCOLOGY_TERMS, _HINDI_TERMS
+    return _MEDICAL_TERMS, _HINDI_TERMS
 
 
 # Global cache for lab reference ranges
@@ -215,13 +230,13 @@ def canonicalize_lab_name(
     if not raw_name or not raw_name.strip():
         return raw_name
 
-    oncology_dict, _ = load_normalization_dictionaries(dict_dir)
+    medical_dict, _ = load_normalization_dictionaries(dict_dir)
 
     # Try all candidate forms
     candidates = _preprocess_term_for_lookup(raw_name)
     for candidate in candidates:
         candidate_upper = candidate.upper()
-        for k, v in oncology_dict.items():
+        for k, v in medical_dict.items():
             if k.upper() == candidate_upper:
                 return v["canonical"]
 
@@ -235,14 +250,14 @@ def dictionary_match(
     dict_dir: Optional[Path] = None,
 ) -> Optional[NormalizedEntity]:
     """
-    Match a term/phrase against oncology and Hindi dictionaries (SRS §5.4.2 step 1).
+    Match a term/phrase against medical, oncology, and Hindi dictionaries (SRS §5.4.2 step 1).
     Supports exact case-insensitive lookup, pre-processing of compound terms, and fuzzy matching.
     """
     if not term or not term.strip():
         return None
 
     cleaned_term = term.strip()
-    oncology_dict, hindi_dict = load_normalization_dictionaries(dict_dir)
+    medical_dict, hindi_dict = load_normalization_dictionaries(dict_dir)
 
     # Try all candidate forms from pre-processing
     candidates = _preprocess_term_for_lookup(cleaned_term)
@@ -250,8 +265,8 @@ def dictionary_match(
     for candidate in candidates:
         candidate_upper = candidate.upper()
 
-        # 1. Exact match (case-insensitive in oncology terms)
-        for k, v in oncology_dict.items():
+        # 1. Exact match (case-insensitive in medical terms)
+        for k, v in medical_dict.items():
             if k.upper() == candidate_upper:
                 return NormalizedEntity(
                     raw_text=cleaned_term,
@@ -276,11 +291,11 @@ def dictionary_match(
     # 3-letter abbreviations (e.g. LFT, RFT, CBC) must match exactly to avoid false positives with words like 'left'.
     term_upper = cleaned_term.upper()
     if len(cleaned_term) >= 4 and not cleaned_term.isdigit():
-        keys_upper = {k.upper(): k for k in oncology_dict.keys() if len(k) >= 4}
+        keys_upper = {k.upper(): k for k in medical_dict.keys() if len(k) >= 4}
         matches = difflib.get_close_matches(term_upper, keys_upper.keys(), n=1, cutoff=max(min_similarity, 0.88))
         if matches:
             matched_key = keys_upper[matches[0]]
-            v = oncology_dict[matched_key]
+            v = medical_dict[matched_key]
             # Adjust confidence by similarity score
             ratio = difflib.SequenceMatcher(None, term_upper, matches[0]).ratio()
             adjusted_conf = round(base_confidence * ratio, 2)
@@ -436,6 +451,219 @@ def regex_parsers(text: str, base_confidence: float = 1.0) -> List[NormalizedEnt
             )
         )
 
+    # -------------------------------------------------------------
+    # 4. Vital Signs (General Clinical Medicine)
+    # -------------------------------------------------------------
+    # Blood Pressure (e.g. BP: 120/80 mmHg, BP 130/85, Blood Pressure: 140/90)
+    bp_pattern = re.compile(
+        r"\b(?:BP|Blood\s+Pressure)\s*[:=\-]?\s*(\d{2,3}\s*/\s*\d{2,3})\s*(?:mm\s*Hg)?\b",
+        re.IGNORECASE,
+    )
+    for match in bp_pattern.finditer(text):
+        bp_val = re.sub(r"\s+", "", match.group(1))
+        entities.append(
+            NormalizedEntity(
+                raw_text=match.group(0).strip(),
+                normalized_term=f"Blood Pressure: {bp_val} mmHg",
+                entity_type="Finding",
+                method="regex",
+                confidence=base_confidence,
+                metadata={"vital": "BP", "value": bp_val},
+            )
+        )
+
+    # Heart Rate / Pulse (e.g. HR: 72 bpm, Pulse: 80 /min, PR: 76 bpm)
+    hr_pattern = re.compile(
+        r"\b(?:HR|Heart\s+Rate|Pulse(?:\s+Rate)?|PR)\s*[:=\-]?\s*(\d{2,3})\s*(?:bpm|/min|beats/min)?\b",
+        re.IGNORECASE,
+    )
+    for match in hr_pattern.finditer(text):
+        hr_val = match.group(1).strip()
+        entities.append(
+            NormalizedEntity(
+                raw_text=match.group(0).strip(),
+                normalized_term=f"Heart Rate: {hr_val} bpm",
+                entity_type="Finding",
+                method="regex",
+                confidence=base_confidence,
+                metadata={"vital": "HR", "value": hr_val},
+            )
+        )
+
+    # Respiratory Rate (e.g. RR: 18 /min, Respiratory Rate: 16/min)
+    rr_pattern = re.compile(
+        r"\b(?:RR|Respiratory\s+Rate)\s*[:=\-]?\s*(\d{1,2})\s*(?:/min|breaths/min|cpm)?\b",
+        re.IGNORECASE,
+    )
+    for match in rr_pattern.finditer(text):
+        rr_val = match.group(1).strip()
+        entities.append(
+            NormalizedEntity(
+                raw_text=match.group(0).strip(),
+                normalized_term=f"Respiratory Rate: {rr_val} /min",
+                entity_type="Finding",
+                method="regex",
+                confidence=base_confidence,
+                metadata={"vital": "RR", "value": rr_val},
+            )
+        )
+
+    # Oxygen Saturation (e.g. SpO2: 98%, SPO2 95%, O2 Sat: 96%)
+    spo2_pattern = re.compile(
+        r"\b(?:SpO2|SPO2|O2\s*Sat(?:uration)?)\s*[:=\-]?\s*(\d{2,3}\s*%?)\b",
+        re.IGNORECASE,
+    )
+    for match in spo2_pattern.finditer(text):
+        spo2_val = match.group(1).strip()
+        if not spo2_val.endswith("%"):
+            spo2_val = f"{spo2_val}%"
+        entities.append(
+            NormalizedEntity(
+                raw_text=match.group(0).strip(),
+                normalized_term=f"Oxygen Saturation (SpO2): {spo2_val}",
+                entity_type="Finding",
+                method="regex",
+                confidence=base_confidence,
+                metadata={"vital": "SpO2", "value": spo2_val},
+            )
+        )
+
+    # Temperature (e.g. Temp: 98.6 F, Temperature: 37 C, 99.4 F)
+    temp_pattern = re.compile(
+        r"\b(?:Temp(?:erature)?)\s*[:=\-]?\s*(\d{2,3}(?:\.\d+)?)\s*(?:°\s*[FCfc]|deg\s*[FCfc]|[FCfc])\b",
+        re.IGNORECASE,
+    )
+    for match in temp_pattern.finditer(text):
+        temp_val = match.group(1).strip()
+        entities.append(
+            NormalizedEntity(
+                raw_text=match.group(0).strip(),
+                normalized_term=f"Body Temperature: {temp_val} F",
+                entity_type="Finding",
+                method="regex",
+                confidence=base_confidence,
+                metadata={"vital": "Temperature", "value": temp_val},
+            )
+        )
+
+    # BMI (e.g. BMI: 24.5 kg/m2, BMI 28.2)
+    bmi_pattern = re.compile(
+        r"\bBMI\s*[:=\-]?\s*(\d{2}(?:\.\d+)?)\s*(?:kg/m2|kg/m\^2)?\b",
+        re.IGNORECASE,
+    )
+    for match in bmi_pattern.finditer(text):
+        bmi_val = match.group(1).strip()
+        entities.append(
+            NormalizedEntity(
+                raw_text=match.group(0).strip(),
+                normalized_term=f"Body Mass Index: {bmi_val} kg/m2",
+                entity_type="Finding",
+                method="regex",
+                confidence=base_confidence,
+                metadata={"vital": "BMI", "value": bmi_val},
+            )
+        )
+
+    # -------------------------------------------------------------
+    # 5. Cardiac & Endocrine Metrics
+    # -------------------------------------------------------------
+    # Left Ventricular Ejection Fraction (e.g. LVEF: 55%, LVEF 55-60%, EF: 60%)
+    lvef_pattern = re.compile(
+        r"\b(?:LVEF|EF)\s*[:=\-]?\s*(\d{2}(?:\s*-\s*\d{2})?\s*%?)\b",
+        re.IGNORECASE,
+    )
+    for match in lvef_pattern.finditer(text):
+        lvef_val = match.group(1).strip()
+        if not lvef_val.endswith("%"):
+            lvef_val = f"{lvef_val}%"
+        entities.append(
+            NormalizedEntity(
+                raw_text=match.group(0).strip(),
+                normalized_term=f"Left Ventricular Ejection Fraction: {lvef_val}",
+                entity_type="Biomarker",
+                method="regex",
+                confidence=base_confidence,
+                metadata={"marker": "LVEF", "value": lvef_val},
+            )
+        )
+
+    # Glycated Hemoglobin (e.g. HbA1c: 6.8%, A1c: 7.2%, HbA1c 8.1%)
+    hba1c_pattern = re.compile(
+        r"\b(?:HbA1c|A1C|A1c|Glycated\s+Hemoglobin)\s*[:=\-]?\s*(\d{1,2}(?:\.\d+)?\s*%?)\b",
+        re.IGNORECASE,
+    )
+    for match in hba1c_pattern.finditer(text):
+        hba1c_val = match.group(1).strip()
+        if not hba1c_val.endswith("%"):
+            hba1c_val = f"{hba1c_val}%"
+        entities.append(
+            NormalizedEntity(
+                raw_text=match.group(0).strip(),
+                normalized_term=f"Glycated Hemoglobin (HbA1c): {hba1c_val}",
+                entity_type="LabTest",
+                method="regex",
+                confidence=base_confidence,
+                metadata={"marker": "HbA1c", "value": hba1c_val},
+            )
+        )
+
+    # -------------------------------------------------------------
+    # 6. Clinical Severity & Staging Scores
+    # -------------------------------------------------------------
+    # Glasgow Coma Scale (e.g. GCS: 15, GCS: 14/15, GCS E4V5M6)
+    gcs_pattern = re.compile(
+        r"\bGCS\s*[:=\-]?\s*(1[0-5]|[3-9]|E\d+V\d+M\d+)(?:\s*/\s*15)?\b",
+        re.IGNORECASE,
+    )
+    for match in gcs_pattern.finditer(text):
+        gcs_val = match.group(1).strip()
+        entities.append(
+            NormalizedEntity(
+                raw_text=match.group(0).strip(),
+                normalized_term=f"Glasgow Coma Scale: {gcs_val}",
+                entity_type="Finding",
+                method="regex",
+                confidence=base_confidence,
+                metadata={"score": "GCS", "value": gcs_val},
+            )
+        )
+
+    # NYHA Functional Class (e.g. NYHA Class II, NYHA III, NYHA Class IV)
+    nyha_pattern = re.compile(
+        r"\bNYHA\s+(?:Class\s+)?([I|V|X]+|[1-4])\b",
+        re.IGNORECASE,
+    )
+    for match in nyha_pattern.finditer(text):
+        nyha_val = match.group(1).strip().upper()
+        entities.append(
+            NormalizedEntity(
+                raw_text=match.group(0).strip(),
+                normalized_term=f"NYHA Class: Class {nyha_val}",
+                entity_type="Staging",
+                method="regex",
+                confidence=base_confidence,
+                metadata={"score": "NYHA", "class": nyha_val},
+            )
+        )
+
+    # CKD Staging (e.g. CKD Stage 3b, CKD Stage IV, CKD Stage 2)
+    ckd_pattern = re.compile(
+        r"\bCKD\s+(?:Stage\s+)?([1-5][a-b]?|I{1,3}|IV|V)\b",
+        re.IGNORECASE,
+    )
+    for match in ckd_pattern.finditer(text):
+        ckd_val = match.group(1).strip().upper()
+        entities.append(
+            NormalizedEntity(
+                raw_text=match.group(0).strip(),
+                normalized_term=f"Chronic Kidney Disease: Stage {ckd_val}",
+                entity_type="Staging",
+                method="regex",
+                confidence=base_confidence,
+                metadata={"staging": "CKD", "stage": ckd_val},
+            )
+        )
+
     return entities
 
 
@@ -459,11 +687,11 @@ def llm_normalize(
     llm_confidence = max(0.0, round(base_confidence - 0.1, 2))
 
     prompt = (
-        f"You are a medical oncology normalization assistant.\\n"
+        f"You are a clinical medicine normalization assistant.\\n"
         f"Given the abbreviation/term: '{term}' extracted from context: '{context[:200]}'\\n"
-        f"Map it to a canonical medical oncology term and entity type.\\n"
+        f"Map it to a canonical medical term and entity type.\\n"
         f"Allowed entity types: Procedure, Regimen, Medication, Diagnosis, Modifier, Biomarker, LabTest, Finding, Staging, DocumentSection, Organization.\\n"
-        f"If the term is not a medical oncology term or cannot be confidently mapped, return null.\\n"
+        f"If the term is not a valid clinical medical term or cannot be confidently mapped, return null.\\n"
         f"Respond ONLY in valid JSON: {{\"canonical\": \"...\", \"type\": \"...\"}} or null."
     )
 

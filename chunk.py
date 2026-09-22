@@ -157,8 +157,8 @@ def chunk_report(
         source_type = source_type_for_page(page_data)
         page_img_rel = f"data/pages/{patient_id}/page_{page_num}.png"
 
-        # Check if this page is a flowsheet table with structured rows
-        is_flowsheet = span.report_type == "ONCOLOGY_FLOWSHEET"
+        # Check if this page is a flowsheet table with structured rows (oncology or general clinical)
+        is_flowsheet = span.report_type in ("ONCOLOGY_FLOWSHEET", "CLINICAL_FLOWSHEET", "VITALS_FLOWSHEET", "ICU_FLOWSHEET", "FLOWSHEET") or "FLOWSHEET" in span.report_type
         table_rows = page_data.get("table_rows", [])
 
         if is_flowsheet and table_rows and isinstance(table_rows, list):

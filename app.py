@@ -529,9 +529,19 @@ def render_chat_interface(
     """
     Renders the chat history, sample query buttons, and active chat input (SRS FR-9.1.2).
     """
-    # Render existing conversation history
-    for msg in st.session_state.messages:
-        render_message_content(msg)
+    # Render existing conversation history or prompt suggestions
+    if not st.session_state.messages:
+        st.info("💡 **Clinical Question Suggestions across Domains:**")
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            st.markdown("- 🩺 **Diagnoses & History**: *What primary illnesses or medical conditions are documented?*")
+            st.markdown("- 🩸 **Lab Trends & Vitals**: *What are the latest Hemoglobin, Creatinine, and Blood Sugar values?*")
+        with col_s2:
+            st.markdown("- 💊 **Medications & Therapy**: *What medications or treatment regimens were administered?*")
+            st.markdown("- 🔬 **Tests & Diagnostics**: *What diagnostic procedures or scans were performed or advised?*")
+    else:
+        for msg in st.session_state.messages:
+            render_message_content(msg)
 
     # Chat Input Box
     prompt = st.chat_input("Ask a clinical question about the medical records...")
@@ -735,8 +745,8 @@ def main():
     # Header & Metric Badges
     st.title("Medical Records Retrieval-Augmented Generation")
     st.markdown(
-        "Clinical question-answering across scanned hospital records, pathology reports, "
-        "oncology flowsheets, and discharge summaries with **verifiable citation evidence**."
+        "Clinical question-answering across scanned hospital records, lab reports, "
+        "clinical flowsheets, imaging studies, and discharge summaries with **verifiable citation evidence**."
     )
 
     col1, col2, col3 = st.columns(3)

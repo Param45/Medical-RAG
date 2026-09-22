@@ -321,10 +321,10 @@ def get_chemo_cycle_status(
     results: List[Dict[str, Any]] = []
     try:
         with driver.session() as session:
-            # Get all chemo administrations with cycle numbers
+            # Get all chemo or medication administrations with cycle numbers
             admin_records = session.run(
                 """
-                MATCH (p:Patient {patient_id: $patient_id})-[:HAS_REPORT]->(r:Report)-[rel:HAS_CHEMO_ADMIN]->(ca:ChemoAdministration)
+                MATCH (p:Patient {patient_id: $patient_id})-[:HAS_REPORT]->(r:Report)-[rel:HAS_CHEMO_ADMIN|HAS_MED_ADMIN]->(ca)
                 RETURN ca.cycle_number AS cycle_number,
                        ca.regimen AS regimen,
                        ca.date AS date,
@@ -666,9 +666,9 @@ def classify_intent(question: str) -> str:
 
     # --- New deterministic intents (checked FIRST, before general ones) ---
 
-    # Chemo cycle status: "how many cycles", "remaining cycles", "completed chemo"
-    if (any(k in q_lower for k in ["chemo", "chemotherapy", "cycle", "round"]) and
-        any(k in q_lower for k in ["remain", "left", "complete", "many", "count", "next"])):
+    # Chemo / treatment cycle status: "how many cycles", "remaining cycles", "completed chemo", "dialysis sessions"
+    if (any(k in q_lower for k in ["chemo", "chemotherapy", "cycle", "cycles", "round", "rounds", "session", "sessions", "fraction", "fractions"]) and
+        any(k in q_lower for k in ["remain", "remaining", "left", "complete", "completed", "many", "count", "next", "status", "scheduled"])):
         return "chemo_cycle_status"
 
     # Suggested vs performed tests: "suggested tests", "pending tests"
@@ -692,8 +692,9 @@ def classify_intent(question: str) -> str:
 
     # Diagnoses patterns (checked early for diagnosis-specific inquiries)
     if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
-        "diagnosis", "diagnoses", "disease", "diseases", "suffering from", "condition",
-        "illness", "what cancer", "type of cancer", "pathology finding"
+        "diagnosis", "diagnoses", "disease", "diseases", "suffering from", "condition", "conditions",
+        "illness", "what cancer", "type of cancer", "pathology finding", "heart disease", "diabetes",
+        "hypertension", "infection", "kidney disease", "liver disease"
     ]):
         return "diagnosis_list"
 
@@ -701,7 +702,7 @@ def classify_intent(question: str) -> str:
     if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
         "biomarker", "biomarkers", "her2", "her-2", "her2neu", "er/pr", "estrogen",
         "progesterone", "ki67", "ki-67", "staging", "stage", "tnm", "grade", "nottingham",
-        "receptor status", "receptors"
+        "receptor status", "receptors", "lvef", "ejection fraction", "hba1c", "a1c", "gcs", "nyha", "ckd stage"
     ]):
         return "staging_biomarker"
 
@@ -709,7 +710,8 @@ def classify_intent(question: str) -> str:
     if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
         "hemoglobin", "platelet", "platelets", "creatinine", "sgot", "sgpt", "lft", "kft",
         "bilirubin", "lab test", "lab tests", "lab value", "lab values", "blood count",
-        "trend", "trends", "wbc", "anc", "tlc", "calcium", "phosphate", "urea"
+        "trend", "trends", "wbc", "anc", "tlc", "calcium", "phosphate", "urea", "bun",
+        "troponin", "bnp", "sodium", "potassium", "chloride", "cholesterol", "lipid", "vitals", "blood pressure", "pulse", "spo2"
     ]):
         return "lab_trend"
 
@@ -718,7 +720,10 @@ def classify_intent(question: str) -> str:
         "medication", "medications", "medicine", "medicines", "drug", "drugs", "chemo",
         "chemotherapy", "regimen", "regimens", "treatment", "treatments", "cycle", "dose",
         "paclitaxel", "doxorubicin", "trastuzumab", "tamoxifen", "letrozole", "surgery",
-        "operation", "procedure", "procedures", "underwent", "mrm", "mastectomy"
+        "operation", "procedure", "procedures", "underwent", "mrm", "mastectomy",
+        "aspirin", "statin", "atorvastatin", "metformin", "insulin", "amlodipine", "losartan",
+        "antibiotic", "ceftriaxone", "azithromycin", "meropenem", "paracetamol", "angioplasty",
+        "stent", "bypass", "cabg", "dialysis", "endoscopy", "colonoscopy", "intubation"
     ]):
         return "medication_history"
 

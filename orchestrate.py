@@ -159,7 +159,7 @@ def generate_answer(
         )
 
     system_prompt = (
-        "You are an expert clinical oncology documentation assistant. "
+        "You are an expert clinical documentation assistant. "
         "Your task is to answer the user's clinical question using ONLY the provided facts.\n\n"
         "STRICT REQUIREMENTS:\n"
         "1. Answer ONLY based on the facts provided below. Do not invent, extrapolate, or assume facts not explicitly stated.\n"

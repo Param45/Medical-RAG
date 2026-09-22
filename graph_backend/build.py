@@ -152,30 +152,31 @@ def run_schema_init(driver=None, schema_path: Optional[Path | str] = None) -> Li
 VALID_NODE_LABELS = {
     "Patient", "Report", "Diagnosis", "Procedure", "Medication", "Regimen",
     "LabTest", "LabResult", "Staging", "Biomarker",
-    "ChemoAdministration", "TreatmentPlan",
+    "ChemoAdministration", "MedicationAdministration", "TreatmentPlan",
 }
 VALID_RELATION_TYPES = {
     "STATES_DIAGNOSIS", "UNDERWENT", "ADMINISTERED", "CONTAINS",
     "HAS_RESULT", "OF_TEST", "HAS_STAGING", "HAS_BIOMARKER",
-    "SUGGESTS_TEST", "HAS_CHEMO_ADMIN", "HAS_TREATMENT_PLAN", "COMPARED_TO",
+    "SUGGESTS_TEST", "HAS_CHEMO_ADMIN", "HAS_MED_ADMIN", "HAS_TREATMENT_PLAN", "COMPARED_TO",
 }
 
 
-EXTRACTION_SYSTEM_PROMPT = """You are an expert clinical oncology knowledge graph extraction assistant.
+EXTRACTION_SYSTEM_PROMPT = """You are an expert clinical knowledge graph extraction assistant for general and specialized medical records.
 Your task is to extract structured medical entities and relationships from clinical report text into a strict knowledge graph schema.
 
 ALLOWED NODE LABELS:
 - Patient: {patient_id}
 - Report: {report_id}
-- Diagnosis: {canonical_name} (e.g., 'Metastatic Breast Cancer', 'Invasive Ductal Carcinoma')
-- Procedure: {canonical_name} (e.g., 'Modified Radical Mastectomy', 'CECT Chest Abdomen Pelvis')
-- Medication: {canonical_name} (e.g., 'Paclitaxel', 'Trastuzumab', 'Doxorubicin')
-- Regimen: {canonical_name} (e.g., 'AC Regimen', 'Docetaxel-Cyclophosphamide')
-- LabTest: {canonical_name} (e.g., 'Hemoglobin', 'Platelet Count', 'Serum Creatinine', 'SGOT', 'SGPT')
+- Diagnosis: {canonical_name} (e.g., 'Metastatic Breast Cancer', 'Essential Hypertension', 'Type 2 Diabetes Mellitus', 'Coronary Artery Disease', 'Pneumonia')
+- Procedure: {canonical_name} (e.g., 'Modified Radical Mastectomy', 'Coronary Angiography', 'Echocardiography', 'Hemodialysis', 'CECT Chest Abdomen Pelvis')
+- Medication: {canonical_name} (e.g., 'Paclitaxel', 'Metformin', 'Atorvastatin', 'Aspirin', 'Doxorubicin', 'Ceftriaxone')
+- Regimen: {canonical_name} (e.g., 'AC Regimen', 'Dual Antiplatelet Therapy', 'Anti-Tubercular Therapy')
+- LabTest: {canonical_name} (e.g., 'Hemoglobin', 'Serum Creatinine', 'Glycated Hemoglobin (HbA1c)', 'Cardiac Troponin I', 'Platelet Count', 'SGOT')
 - LabResult: {value, unit, date, result_date}
-- Staging: {t, n, m, date}
-- Biomarker: {marker, value, date} (e.g., marker='ER', value='8/8' or marker='HER2', value='3+')
+- Staging: {t, n, m, date, stage}
+- Biomarker: {marker, value, date} (e.g., marker='ER', value='8/8' or marker='LVEF', value='55%' or marker='HER2', value='3+')
 - ChemoAdministration: {cycle_number, date, regimen, medications}
+- MedicationAdministration: {cycle_number, date, regimen, medications}
 - TreatmentPlan: {regimen, planned_cycles, confidence_note}
 
 ALLOWED RELATIONSHIPS:
@@ -189,14 +190,15 @@ ALLOWED RELATIONSHIPS:
 - (Report)-[:HAS_BIOMARKER]->(Biomarker)
 - (Report)-[:SUGGESTS_TEST {date}]->(LabTest or Procedure)  — for tests that were SUGGESTED/ADVISED but not necessarily performed. Look for language like "advised", "to be done", "kept for", "plan for", "suggested", "recommended".
 - (Report)-[:HAS_CHEMO_ADMIN]->(ChemoAdministration)  — for explicit chemotherapy cycle administrations with cycle numbers. Extract cycle_number from CYCLE/DAY fields or mentions like "Cycle 3", "C3D1", "#3".
-- (Report)-[:HAS_TREATMENT_PLAN]->(TreatmentPlan)  — for treatment plans mentioning total planned cycles, e.g., "4EC → 4T", "plan: EC #4", "6 cycles of AC". Extract planned_cycles as a number.
+- (Report)-[:HAS_MED_ADMIN]->(MedicationAdministration)  — for scheduled drug courses, dialysis sessions, or radiation fractions with sequence/cycle numbers.
+- (Report)-[:HAS_TREATMENT_PLAN]->(TreatmentPlan)  — for treatment plans mentioning total planned cycles or courses, e.g., "4EC → 4T", "plan: EC #4", "6 cycles of AC", "12 hemodialysis sessions". Extract planned_cycles as a number.
 - (Report)-[:COMPARED_TO {comparison_text}]->(Report)  — for radiology reports that state comparison with a previous scan, e.g., "as compared to previous scan dated...", "no significant change compared to prior study". Capture the comparison statement verbatim.
 
 SPECIAL INSTRUCTIONS FOR SUGGESTED TESTS:
 When text says a test was "advised", "to be done", "suggested", "recommended", "planned", or "kept for", extract it as SUGGESTS_TEST (not HAS_RESULT). Only extract HAS_RESULT when the test was actually PERFORMED and a result value exists.
 
-SPECIAL INSTRUCTIONS FOR CHEMO CYCLES:
-When text contains cycle information ("Cycle 3", "C3D1", "CYCLE/DAY: 3/1", "#3"), extract a ChemoAdministration with an explicit cycle_number integer. Do NOT make the LLM count or infer cycle numbers — only extract what is explicitly stated.
+SPECIAL INSTRUCTIONS FOR CYCLES & SESSIONS:
+When text contains cycle or session information ("Cycle 3", "C3D1", "CYCLE/DAY: 3/1", "#3", "Session 4"), extract an administration node with an explicit cycle_number integer. Do NOT make the LLM count or infer cycle numbers — only extract what is explicitly stated.
 
 SPECIAL INSTRUCTIONS FOR LAB RESULTS:
 Include result_date in properties if a specific date for the result is available (distinct from the report date). This is especially important for flowsheet tables where each column has its own date.
@@ -210,8 +212,8 @@ INSTRUCTIONS:
   {
     "subject_label": "Report" | "Patient" | "Regimen" | "LabResult",
     "subject_name": "...",
-    "relation": "STATES_DIAGNOSIS" | "UNDERWENT" | "ADMINISTERED" | "CONTAINS" | "HAS_RESULT" | "HAS_STAGING" | "HAS_BIOMARKER" | "SUGGESTS_TEST" | "HAS_CHEMO_ADMIN" | "HAS_TREATMENT_PLAN" | "COMPARED_TO",
-    "object_label": "Diagnosis" | "Procedure" | "Medication" | "Regimen" | "LabResult" | "Staging" | "Biomarker" | "ChemoAdministration" | "TreatmentPlan" | "LabTest" | "Report",
+    "relation": "STATES_DIAGNOSIS" | "UNDERWENT" | "ADMINISTERED" | "CONTAINS" | "HAS_RESULT" | "HAS_STAGING" | "HAS_BIOMARKER" | "SUGGESTS_TEST" | "HAS_CHEMO_ADMIN" | "HAS_MED_ADMIN" | "HAS_TREATMENT_PLAN" | "COMPARED_TO",
+    "object_label": "Diagnosis" | "Procedure" | "Medication" | "Regimen" | "LabResult" | "Staging" | "Biomarker" | "ChemoAdministration" | "MedicationAdministration" | "TreatmentPlan" | "LabTest" | "Report",
     "object_name": "...",
     "properties": { ... }
   }
@@ -575,13 +577,21 @@ def write_triples_to_neo4j(
                         )
                     written_count += 1
 
-            elif relation == "HAS_CHEMO_ADMIN":
-                # Explicit chemotherapy cycle administration with cycle number
+            elif relation in ("HAS_CHEMO_ADMIN", "HAS_MED_ADMIN"):
+                # Explicit chemotherapy or medication cycle/course administration with cycle number
                 cycle_number = props.get("cycle_number")
-                chemo_date = str(props.get("date") or report_date or "").strip()
+                admin_date = str(props.get("date") or report_date or "").strip()
                 regimen_name = canonicalize_lab_name(str(props.get("regimen") or obj_name or "").strip())
                 medications = props.get("medications", [])
-                admin_id = f"{report_id}__chemo_{cycle_number or 'unknown'}_{chemo_date}"
+                
+                if relation == "HAS_MED_ADMIN" or obj_label == "MedicationAdministration":
+                    admin_id = f"{report_id}__med_{cycle_number or 'unknown'}_{admin_date}"
+                    label_name = "MedicationAdministration"
+                    rel_name = "HAS_MED_ADMIN"
+                else:
+                    admin_id = f"{report_id}__chemo_{cycle_number or 'unknown'}_{admin_date}"
+                    label_name = "ChemoAdministration"
+                    rel_name = "HAS_CHEMO_ADMIN"
 
                 if cycle_number is not None:
                     try:
@@ -592,20 +602,20 @@ def write_triples_to_neo4j(
                     cycle_num_int = -1
 
                 session.run(
-                    """
-                    MERGE (r:Report {report_id: $report_id})
-                    MERGE (ca:ChemoAdministration {admin_id: $admin_id})
-                    ON CREATE SET ca.cycle_number = $cycle_number,
-                                  ca.date = $date,
-                                  ca.regimen = $regimen,
-                                  ca.medications = $medications
-                    MERGE (r)-[rel:HAS_CHEMO_ADMIN]->(ca)
+                    f"""
+                    MERGE (r:Report {{report_id: $report_id}})
+                    MERGE (admin:{label_name} {{admin_id: $admin_id}})
+                    ON CREATE SET admin.cycle_number = $cycle_number,
+                                  admin.date = $date,
+                                  admin.regimen = $regimen,
+                                  admin.medications = $medications
+                    MERGE (r)-[rel:{rel_name}]->(admin)
                     SET rel.evidence_id = $evidence_id, rel.confidence = $confidence
                     """,
                     report_id=report_id,
                     admin_id=admin_id,
                     cycle_number=cycle_num_int,
-                    date=chemo_date,
+                    date=admin_date,
                     regimen=regimen_name,
                     medications=medications if isinstance(medications, list) else [str(medications)],
                     evidence_id=evidence_id,

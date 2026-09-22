@@ -186,7 +186,12 @@ REPORT_ANCHORS: List[Tuple[str, Callable[[str, str], bool]]] = [
         "CONSENT_FORM",
         lambda h, f: ("सहमति पत्र" in h or "सहमति" in h or "CONSENT FORM" in h or "CONSENT" in h),
     ),
-    # 14. Oncology Flowsheet
+    # 14. Clinical Flowsheet / Vitals Chart (General Medicine)
+    (
+        "CLINICAL_FLOWSHEET",
+        lambda h, f: any(k in h for k in ["VITALS CHART", "CLINICAL FLOWSHEET", "ICU FLOWSHEET", "NURSING FLOWSHEET", "DAILY OBSERVATION CHART"]),
+    ),
+    # 15. Oncology Flowsheet
     (
         "ONCOLOGY_FLOWSHEET",
         lambda h, f: (
@@ -195,7 +200,42 @@ REPORT_ANCHORS: List[Tuple[str, Callable[[str, str], bool]]] = [
             or ("ROTARY CANCER HOSPITAL" in h and ("CLINIC" in h or "ONCOLOGY" in h))
         ),
     ),
-    # 15. General Lab Report (Hematology, Biochemistry, Diagnostics, etc.)
+    # 16. Cardiology ECG / EKG
+    (
+        "CARDIOLOGY_ECG",
+        lambda h, f: any(k in h for k in ["ELECTROCARDIOGRAM", "ELECTROCARDIOGRAPHY", "12-LEAD ECG", "12 LEAD ECG", "STANDARD 12 LEAD", "ECG REPORT", "EKG REPORT"]),
+    ),
+    # 17. Pulmonary Function Test (PFT / Spirometry)
+    (
+        "PULMONARY_FUNCTION_TEST",
+        lambda h, f: any(k in h for k in ["PULMONARY FUNCTION TEST", "SPIROMETRY REPORT", "PFT REPORT", "DIFFUSION CAPACITY"]),
+    ),
+    # 18. Radiology MRI
+    (
+        "RADIOLOGY_MRI",
+        lambda h, f: any(k in h for k in ["MAGNETIC RESONANCE", "MRI", "MR BRAIN", "MR SPINE", "MRI SCAN", "MRI CHEST", "MRI PELVIS", "MRI ABDOMEN"]) and not any(k in h for k in ["PET-CT", "CECT", "MAMMOG"]),
+    ),
+    # 19. Radiology Plain X-Ray
+    (
+        "RADIOLOGY_XRAY",
+        lambda h, f: any(k in h for k in ["CHEST X-RAY", "CHEST XRAY", "SKIAGRAM", "PLAIN RADIOGRAPHY", "X-RAY REPORT", "XRAY REPORT"]) and not any(k in h for k in ["CT SCAN", "CECT", "PET"]),
+    ),
+    # 20. Endoscopy / Colonoscopy / Bronchoscopy
+    (
+        "ENDOSCOPY_REPORT",
+        lambda h, f: any(k in h for k in ["ENDOSCOPY REPORT", "UPPER GI ENDOSCOPY", "COLONOSCOPY REPORT", "BRONCHOSCOPY REPORT", "GASTROSCOPY REPORT"]),
+    ),
+    # 21. Medication Administration Record (General)
+    (
+        "MEDICATION_ADMIN_RECORD",
+        lambda h, f: any(k in h for k in ["MEDICATION ADMINISTRATION RECORD", "MAR REPORT", "DRUG ADMINISTRATION RECORD", "TREATMENT SHEET"]) and "CHEMO" not in h and "DAYCARE" not in h,
+    ),
+    # 22. Outpatient / Inpatient Consultation Note
+    (
+        "CONSULTATION_NOTE",
+        lambda h, f: any(k in h for k in ["CONSULTATION NOTE", "OPD SLIP", "OUTPATIENT RECORD", "CLINICAL PROGRESS NOTE", "EMERGENCY NOTE", "TRIAGE ASSESSMENT"]),
+    ),
+    # 23. General Lab Report (Hematology, Biochemistry, Diagnostics, etc.)
     (
         "LAB_REPORT_GENERAL",
         lambda h, f: (
