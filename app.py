@@ -1,10 +1,11 @@
 """
 Medical Records RAG Demo — Streamlit Web Application (SRS §9, BUILD_GUIDE Phase 5)
 
-A locally hosted Streamlit application enabling clinical RAG over patient records:
+A locally hosted clinical workstation enabling multi-modal retrieval-augmented generation:
 - Dual Roles: Individual (patient self-lookup) & Group (hospital staff multi-patient review)
 - Dual Backends: GraphRAG on Neo4j & PageIndex (pure LLM reasoning tree)
 - Interactive Chat Interface with Evidence Tracking & Grounded Citations
+- Ephemeral Single-Report Sandbox for user-uploaded clinical PDF reports
 
 Maps to BUILD_GUIDE Tasks 5.1, 5.2 & 5.3 (Evidence Panel).
 """
@@ -30,6 +31,7 @@ if hasattr(sys.stdout, "reconfigure"):
 load_dotenv()
 
 from chunk import chunk_all_patients
+from device_utils import get_device_info
 from evidence_store import EvidenceRecord, get_evidence_by_id, load_evidence
 from graph_backend.build import build_all_patients, run_schema_init
 from ingest import ingest_all
@@ -47,6 +49,448 @@ from temp_session import (
 
 
 # -----------------------------------------------------------------------------
+# 0. Modern Clinical Workstation Stylesheet (CSS Design System)
+# -----------------------------------------------------------------------------
+
+CUSTOM_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+    --bg-main: #0b0f17;
+    --bg-card: #111827;
+    --bg-card-hover: #172136;
+    --bg-surface: #1e293b;
+    --border-subtle: rgba(255, 255, 255, 0.08);
+    --border-accent: rgba(14, 165, 233, 0.4);
+    --primary: #0ea5e9;
+    --primary-glow: rgba(14, 165, 233, 0.2);
+    --graph-indigo: #6366f1;
+    --graph-indigo-glow: rgba(99, 102, 241, 0.15);
+    --tree-emerald: #10b981;
+    --tree-emerald-glow: rgba(16, 185, 129, 0.15);
+    --text-primary: #f8fafc;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+}
+
+/* Global Typography & Background Override */
+html, body, [class*="css"], .stApp {
+    font-family: var(--font-sans) !important;
+    background-color: var(--bg-main) !important;
+    color: var(--text-primary) !important;
+}
+
+/* Hide default streamlit decor */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header[data-testid="stHeader"] {
+    background-color: transparent !important;
+    backdrop-filter: blur(8px);
+}
+
+/* Executive App Bar */
+.med-app-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.15rem 1.4rem;
+    background: linear-gradient(135deg, rgba(17, 24, 39, 0.95) 0%, rgba(15, 23, 42, 0.95) 100%);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    margin-bottom: 1.25rem;
+    box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(12px);
+}
+
+.med-app-bar-brand {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.med-brand-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 20px var(--primary-glow);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.med-brand-title {
+    font-size: 1.2rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+}
+
+.med-brand-subtitle {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    font-weight: 400;
+    margin-top: 0.15rem;
+}
+
+.med-pill-badge {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 0.2rem 0.55rem;
+    border-radius: 9999px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: rgba(14, 165, 233, 0.15);
+    color: #38bdf8;
+    border: 1px solid rgba(14, 165, 233, 0.3);
+}
+
+.med-pill-live {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    padding: 0.25rem 0.65rem;
+    border-radius: 9999px;
+    background: rgba(16, 185, 129, 0.12);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.25);
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.med-pulse-dot {
+    width: 7px;
+    height: 7px;
+    background-color: #10b981;
+    border-radius: 50%;
+    box-shadow: 0 0 8px #10b981;
+    animation: med-pulse 2s infinite;
+}
+
+@keyframes med-pulse {
+    0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+    70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+    100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+
+/* KPI Scope Grid */
+.med-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.85rem;
+    margin-bottom: 1.25rem;
+}
+
+.med-kpi-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 0.85rem 1rem;
+    transition: all 0.2s ease;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.med-kpi-card:hover {
+    border-color: var(--border-accent);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.med-kpi-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.med-kpi-value {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #ffffff;
+    font-family: var(--font-sans);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.med-kpi-subtext {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    margin-top: 0.15rem;
+    font-family: var(--font-mono);
+}
+
+/* Dual Backend Comparison Cards */
+.comparison-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 1.15rem;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    position: relative;
+    overflow: hidden;
+}
+
+.comparison-card.graph-card {
+    border-top: 3px solid var(--graph-indigo);
+}
+
+.comparison-card.pageindex-card {
+    border-top: 3px solid var(--tree-emerald);
+}
+
+.comparison-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.85rem;
+    padding-bottom: 0.65rem;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.comparison-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.comparison-tag {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 0.18rem 0.5rem;
+    border-radius: 6px;
+    text-transform: uppercase;
+}
+
+.graph-tag {
+    background: rgba(99, 102, 241, 0.15);
+    color: #a5b4fc;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+}
+
+.pageindex-tag {
+    background: rgba(16, 185, 129, 0.15);
+    color: #6ee7b7;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.comparison-body {
+    font-size: 0.92rem;
+    line-height: 1.6;
+    color: #e2e8f0;
+    flex-grow: 1;
+}
+
+.comparison-citations-row {
+    margin-top: 0.9rem;
+    padding-top: 0.65rem;
+    border-top: 1px solid var(--border-subtle);
+}
+
+/* Citation Pill Badges */
+.cit-badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-weight: 500;
+    padding: 0.18rem 0.5rem;
+    margin: 0.15rem 0.2rem;
+    border-radius: 6px;
+    background: rgba(14, 165, 233, 0.1);
+    color: #38bdf8;
+    border: 1px solid rgba(14, 165, 233, 0.25);
+    transition: all 0.15s ease;
+}
+
+.cit-badge:hover {
+    background: rgba(14, 165, 233, 0.2);
+    border-color: rgba(14, 165, 233, 0.5);
+    color: #7dd3fc;
+}
+
+/* Modern Tabs Styling */
+div[data-testid="stTabs"] [role="tablist"] {
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--border-subtle);
+    padding-bottom: 0.5rem;
+    margin-bottom: 1.25rem;
+}
+
+div[data-testid="stTabs"] button[role="tab"] {
+    font-family: var(--font-sans) !important;
+    font-size: 0.88rem !important;
+    font-weight: 600 !important;
+    color: var(--text-secondary) !important;
+    border-radius: 8px !important;
+    padding: 0.45rem 1.15rem !important;
+    background: rgba(255, 255, 255, 0.02) !important;
+    border: 1px solid transparent !important;
+    transition: all 0.2s ease !important;
+}
+
+div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+    color: #ffffff !important;
+    background: rgba(14, 165, 233, 0.1) !important;
+    border: 1px solid rgba(14, 165, 233, 0.3) !important;
+    box-shadow: 0 0 15px rgba(14, 165, 233, 0.15);
+}
+
+/* Streamlit Sidebar Styling */
+section[data-testid="stSidebar"] {
+    background-color: #0d121f !important;
+    border-right: 1px solid var(--border-subtle) !important;
+}
+
+section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
+    color: #ffffff !important;
+    font-size: 0.82rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.08em !important;
+}
+
+/* Chat Input Styling */
+div[data-testid="stChatInput"] {
+    border-radius: 12px !important;
+    border: 1px solid var(--border-subtle) !important;
+    background: rgba(17, 24, 39, 0.9) !important;
+    backdrop-filter: blur(10px) !important;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4) !important;
+}
+
+div[data-testid="stChatInput"]:focus-within {
+    border-color: var(--primary) !important;
+    box-shadow: 0 0 20px var(--primary-glow) !important;
+}
+
+/* Chat Messages */
+div[data-testid="stChatMessage"] {
+    background: rgba(17, 24, 39, 0.6) !important;
+    border: 1px solid var(--border-subtle) !important;
+    border-radius: 12px !important;
+    padding: 1.15rem !important;
+    margin-bottom: 1rem !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2) !important;
+}
+
+/* Expanders */
+div[data-testid="stExpander"] {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border-subtle) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2) !important;
+    margin-bottom: 0.75rem !important;
+}
+
+/* Buttons */
+.stButton > button {
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    font-size: 0.86rem !important;
+    transition: all 0.2s ease !important;
+    border: 1px solid var(--border-subtle) !important;
+}
+
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%) !important;
+    border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    box-shadow: 0 4px 14px var(--primary-glow) !important;
+}
+
+.stButton > button[kind="primary"]:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 20px rgba(14, 165, 233, 0.35) !important;
+}
+
+.stButton > button[kind="secondary"]:hover {
+    border-color: rgba(255, 255, 255, 0.2) !important;
+    background: var(--bg-surface) !important;
+}
+
+/* Sandbox Security Card */
+.sandbox-card {
+    background: rgba(15, 23, 42, 0.8);
+    border: 1px solid rgba(14, 165, 233, 0.25);
+    border-radius: 10px;
+    padding: 0.9rem 1.15rem;
+    margin-bottom: 1.25rem;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.85rem;
+}
+
+.sandbox-icon {
+    color: #38bdf8;
+    flex-shrink: 0;
+    margin-top: 0.15rem;
+}
+
+.sandbox-title {
+    font-weight: 700;
+    font-size: 0.9rem;
+    color: #ffffff;
+    margin-bottom: 0.2rem;
+}
+
+.sandbox-desc {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+/* Pipeline Step Markers */
+.pipeline-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 0.6rem;
+    margin: 1rem 0 1.25rem 0;
+}
+
+.pipeline-step {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 0.65rem 0.5rem;
+    text-align: center;
+}
+
+.pipeline-num {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    color: #38bdf8;
+    font-weight: 700;
+}
+
+.pipeline-name {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #e2e8f0;
+    margin-top: 0.2rem;
+}
+</style>
+"""
+
+
+# -----------------------------------------------------------------------------
 # 1. Helper Functions & Evidence Store Lookups (SRS §9.1.3, Task 5.3)
 # -----------------------------------------------------------------------------
 
@@ -60,7 +504,6 @@ def get_chat_avatar(role: str) -> str:
     return ":material/person:" if role == "user" else ":material/smart_toy:"
 
 
-
 def resolve_selected_patients(
     mode: str,
     selected_label_or_labels: Any,
@@ -68,10 +511,6 @@ def resolve_selected_patients(
 ) -> List[str]:
     """
     Resolves UI patient selection into a clean list of patient IDs (SRS FR-9.1.1, FR-8.1.1).
-    
-    - In Individual mode: Maps the single chosen display label to [patient_id].
-    - In Group mode: If 'All patients' is checked, resolves to all registered patient IDs;
-      otherwise maps selected multiselect labels to a list of patient IDs.
     """
     label_to_id = get_label_to_id_mapping()
     norm_mode = mode.strip().lower()
@@ -124,11 +563,11 @@ def get_confidence_badge_markdown(confidence: float) -> str:
     """
     conf_pct = f"{confidence * 100:.0f}%"
     if confidence >= 0.8:
-        return f":green[● High confidence ({conf_pct})]"
+        return f":green[High confidence ({conf_pct})]"
     elif confidence >= 0.5:
-        return f":orange[● Medium confidence ({conf_pct})]"
+        return f":orange[Medium confidence ({conf_pct})]"
     else:
-        return f":red[● Low confidence ({conf_pct})]"
+        return f":red[Low confidence ({conf_pct})]"
 
 
 def parse_patient_id_from_evidence_id(evidence_id: str) -> str:
@@ -166,22 +605,32 @@ def clear_chat_history() -> None:
 
 def render_sidebar() -> Tuple[str, List[str], str, bool]:
     """
-    Renders sidebar controls top-to-bottom exactly per SRS FR-9.1.1:
-    1. Mode dropdown (Individual / Group)
-    2. Patient selector (Single select or Multi-select + 'All patients' checkbox)
-    3. Backend toggle (GraphRAG / PageIndex)
-    4. Optional 'Compare both backends' checkbox
-
-    Returns:
-        Tuple of (mode, selected_patients, backend, compare_both).
+    Renders clean executive sidebar controls:
+    1. Operational Scope (Individual / Group)
+    2. Patient selector
+    3. Active Configuration & Database Indicator
+    4. Session lifecycle actions
     """
-    st.sidebar.title("Medical Records RAG")
-    st.sidebar.caption("Clinical Document Intelligence & Evidence Explorer")
-    st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        """
+        <div style="display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.25rem;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0ea5e9" stroke-width="2.2">
+                <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+            </svg>
+            <span style="font-size: 1.05rem; font-weight: 700; color: #ffffff; letter-spacing: -0.01em;">MED-RAG</span>
+        </div>
+        <div style="font-size: 0.72rem; color: #94a3b8; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 1rem;">
+            Clinical Intelligence
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.sidebar.markdown("### Configuration & Scope")
 
     # 1. Mode dropdown
     mode = st.sidebar.selectbox(
-        "Mode",
+        "Operational Mode",
         options=["Individual", "Group"],
         index=0,
         help="Individual mode scopes queries to one patient. Group mode allows multi-patient comparison.",
@@ -200,7 +649,7 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
 
     if mode == "Individual":
         selected_label = st.sidebar.selectbox(
-            "Patient",
+            "Target Patient",
             options=display_names,
             index=default_patient_index,
             help="Select the single patient whose medical records you wish to view.",
@@ -208,16 +657,16 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
         selected_patients = resolve_selected_patients(mode, selected_label)
     else:  # Group mode
         all_patients = st.sidebar.checkbox(
-            "All patients",
+            "Select all cohort patients",
             value=False,
             help="Select all registered patients in the hospital database.",
         )
         if all_patients:
-            st.sidebar.info(f"Targeting all {len(all_patient_ids())} patients.")
+            st.sidebar.info(f"Targeting all {len(all_patient_ids())} registered patients.")
             selected_patients = all_patient_ids()
         else:
             selected_labels = st.sidebar.multiselect(
-                "Patients",
+                "Cohort Patients",
                 options=display_names,
                 default=display_names[:1] if display_names else [],
                 help="Select one or more patients to query or compare.",
@@ -231,34 +680,47 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
     compare_both = True
 
     # Clear chat affordance
-    if st.sidebar.button("Clear Chat History", use_container_width=True):
+    if st.sidebar.button("Clear Conversation", use_container_width=True):
         clear_chat_history()
         st.rerun()
 
     # Scope Summary Badge in Sidebar
     st.sidebar.markdown("### Active Scope")
-    st.sidebar.markdown(f"**Mode:** `{mode}`")
-    st.sidebar.markdown(
-        f"**Patients:** `{', '.join(get_display_label(p) for p in selected_patients) if selected_patients else 'None'}`"
-    )
-    st.sidebar.markdown("**Backend:** `Compare both Backends`")
-
-    # Hardware compute device indicator
-    from device_utils import get_device_info
+    patient_display = ', '.join(get_display_label(p) for p in selected_patients) if selected_patients else 'None'
     dev_info = get_device_info()
-    if dev_info["is_gpu_available"]:
-        st.sidebar.markdown(f"**Compute:** `GPU ({dev_info['device_name']})`")
-    else:
-        st.sidebar.markdown("**Compute:** `CPU Mode`")
+    accel_badge = f"GPU ({dev_info['device_name']})" if dev_info["is_gpu_available"] else "CPU Mode"
+
+    st.sidebar.markdown(
+        f"""
+        <div style="background: rgba(17, 24, 39, 0.8); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 0.75rem 0.85rem; font-size: 0.78rem; line-height: 1.6;">
+            <div style="color: #94a3b8; font-size: 0.68rem; text-transform: uppercase; font-weight: 600;">Mode</div>
+            <div style="color: #ffffff; font-weight: 600; margin-bottom: 0.4rem;">{mode}</div>
+            <div style="color: #94a3b8; font-size: 0.68rem; text-transform: uppercase; font-weight: 600;">Patient(s)</div>
+            <div style="color: #ffffff; font-weight: 600; margin-bottom: 0.4rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{patient_display}">{patient_display}</div>
+            <div style="color: #94a3b8; font-size: 0.68rem; text-transform: uppercase; font-weight: 600;">Engine Evaluation</div>
+            <div style="color: #38bdf8; font-weight: 600; margin-bottom: 0.4rem;">Dual Comparison</div>
+            <div style="color: #94a3b8; font-size: 0.68rem; text-transform: uppercase; font-weight: 600;">Compute</div>
+            <div style="color: {'#34d399' if dev_info['is_gpu_available'] else '#94a3b8'}; font-weight: 600;">{accel_badge}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # Temporary Neo4j indicator badge if active
     if any(is_temp_patient(p) for p in selected_patients):
-        st.sidebar.info("Temporary Neo4j Sandbox: `af2857f2`")
+        st.sidebar.markdown(
+            """
+            <div style="margin-top: 0.75rem; padding: 0.5rem 0.75rem; background: rgba(99, 102, 241, 0.15); border: 1px solid rgba(99, 102, 241, 0.3); border-radius: 6px; font-size: 0.72rem; color: #a5b4fc; font-family: var(--font-mono);">
+                Isolated Sandbox: af2857f2
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     # End Temporary Session button if temporary report is active
     if TEMP_PATIENT_ID in PATIENTS:
         st.sidebar.markdown("---")
-        if st.sidebar.button("End Session & Clear Report", use_container_width=True, help="Permanently wipes all uploaded files and temporary Neo4j records."):
+        if st.sidebar.button("End Session & Purge Report", use_container_width=True, help="Permanently wipes all uploaded files and temporary Neo4j records."):
             cleanup_temp_patient(TEMP_PATIENT_ID)
             st.session_state.temp_report_active = False
             st.session_state.temp_report_summary = None
@@ -279,9 +741,7 @@ EVIDENCE_BRACKET_REGEX = re.compile(
 
 
 def extract_evidence_ids_from_line(line: str) -> List[str]:
-    """
-    Extracts all clean evidence IDs from a line containing bracketed citations.
-    """
+    """Extracts all clean evidence IDs from a line containing bracketed citations."""
     matches = EVIDENCE_BRACKET_REGEX.findall(line)
     cits: List[str] = []
     for m in matches:
@@ -293,9 +753,7 @@ def extract_evidence_ids_from_line(line: str) -> List[str]:
 
 
 def strip_evidence_brackets(line: str) -> str:
-    """
-    Removes raw [patient_id__...] citation brackets from line text for clean reading.
-    """
+    """Removes raw [patient_id__...] citation brackets from line text for clean reading."""
     return EVIDENCE_BRACKET_REGEX.sub("", line).rstrip()
 
 
@@ -309,9 +767,9 @@ def render_evidence_expander(evidence_id: str) -> None:
     if patient_id:
         record = get_evidence_by_id(patient_id=patient_id, evidence_id=evidence_id)
 
-    with st.expander(f"Source Evidence: `{evidence_id}`", expanded=False):
+    with st.expander(f"Source Evidence: {evidence_id}", expanded=False):
         if record is None:
-            st.warning(f"Evidence record `{evidence_id}` could not be found in the local evidence store.")
+            st.warning(f"Evidence record {evidence_id} could not be found in the local evidence store.")
             return
 
         # Top Metadata Banner
@@ -330,7 +788,7 @@ def render_evidence_expander(evidence_id: str) -> None:
         st.markdown("---")
 
         # Evidence Tabs: Raw OCR Text vs Source Page Scan
-        tab_raw, tab_image = st.tabs(["Raw OCR Text", "Original Page Scan"])
+        tab_raw, tab_image = st.tabs(["Raw Verbatim OCR Text", "Original Page Scan"])
 
         with tab_raw:
             st.caption("Verbatim extracted text from source document (no paraphrasing):")
@@ -357,7 +815,7 @@ def render_citations_list(citations: List[str]) -> None:
     if not citations:
         return
 
-    st.markdown(f"##### Source Evidence Trail ({len(citations)} item{'s' if len(citations) > 1 else ''})")
+    st.markdown(f"##### Verified Evidence Trail ({len(citations)} source document{'s' if len(citations) > 1 else ''})")
     for ev_id in citations:
         render_evidence_expander(ev_id)
 
@@ -384,22 +842,65 @@ def render_message_content(msg: Dict[str, Any]) -> None:
             graph_res = msg.get("graph_result", {})
             pi_res = msg.get("pageindex_result", {})
 
-            st.markdown("#### Side-by-Side Backend Comparison")
             col1, col2 = st.columns(2)
 
             with col1:
-                st.markdown("##### GraphRAG (Neo4j)")
-                st.markdown(graph_res.get("answer", "No response generated."))
                 citations_g = graph_res.get("citations", [])
-                if citations_g:
-                    st.caption(f"Citations ({len(citations_g)}): {', '.join(f'`{c}`' for c in citations_g)}")
+                cit_pills_g = "".join(f'<span class="cit-badge" title="Source Evidence">{c}</span>' for c in citations_g) if citations_g else '<span style="color: var(--text-muted); font-size: 0.75rem;">None</span>'
+                answer_g = graph_res.get("answer", "No response generated.")
+                st.markdown(
+                    f"""
+                    <div class="comparison-card graph-card">
+                        <div class="comparison-header">
+                            <div class="comparison-title">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#818cf8" stroke-width="2.2"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><circle cx="6" cy="18" r="3"/><line x1="8.5" y1="7.5" x2="15.5" y2="16.5"/><line x1="6" y1="9" x2="6" y2="15"/></svg>
+                                <span>GraphRAG</span>
+                            </div>
+                            <span class="comparison-tag graph-tag">Neo4j Knowledge Graph</span>
+                        </div>
+                        <div class="comparison-body">
+                            {answer_g}
+                        </div>
+                        <div class="comparison-citations-row">
+                            <div style="font-size: 0.68rem; font-weight: 600; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.25rem;">Grounded Citations:</div>
+                            {cit_pills_g}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
             with col2:
-                st.markdown("##### PageIndex (Tree Traversal)")
-                st.markdown(pi_res.get("answer", "No response generated."))
                 citations_pi = pi_res.get("citations", [])
-                if citations_pi:
-                    st.caption(f"Citations ({len(citations_pi)}): {', '.join(f'`{c}`' for c in citations_pi)}")
+                cit_pills_pi = "".join(f'<span class="cit-badge" title="Source Evidence">{c}</span>' for c in citations_pi) if citations_pi else '<span style="color: var(--text-muted); font-size: 0.75rem;">None</span>'
+                answer_pi = pi_res.get("answer", "No response generated.")
+                st.markdown(
+                    f"""
+                    <div class="comparison-card pageindex-card">
+                        <div class="comparison-header">
+                            <div class="comparison-title">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+                                <span>PageIndex</span>
+                            </div>
+                            <span class="comparison-tag pageindex-tag">Hierarchical Reasoning Tree</span>
+                        </div>
+                        <div class="comparison-body">
+                            {answer_pi}
+                        </div>
+                        <div class="comparison-citations-row">
+                            <div style="font-size: 0.68rem; font-weight: 600; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.25rem;">Grounded Citations:</div>
+                            {cit_pills_pi}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            # Combined verifiable evidence trail below the comparison cards
+            all_cits = list(dict.fromkeys(citations_g + citations_pi))
+            if all_cits:
+                st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+                render_citations_list(all_cits)
 
         else:
             # Single Backend Layout
@@ -411,6 +912,7 @@ def render_message_content(msg: Dict[str, Any]) -> None:
             citations = msg.get("citations", [])
             if citations:
                 st.caption(f"Citations ({len(citations)}): {', '.join(f'`{c}`' for c in citations)}")
+                render_citations_list(citations)
 
 
 def execute_query(
@@ -525,20 +1027,26 @@ def render_user_report_tab() -> None:
     Neo4j database (af2857f2), query their report with grounded citations, and clean up
     the entire session upon completion.
     """
-    st.markdown("### Upload & Analyze Your Medical Report")
     st.markdown(
-        "Upload a scanned or digital medical report (PDF). The system executes the full end-to-end "
-        "pipeline: OCR extraction, report boundary detection, clinical entity normalization, "
-        "knowledge graph construction in a **temporary isolated Neo4j database**, and hierarchical "
-        "reasoning tree generation."
-    )
-
-    # Privacy & Isolation Notice Card
-    st.info(
-        "🔒 **Session Sandbox & Data Privacy:** All uploaded reports, OCR text, and knowledge graphs "
-        f"are stored strictly for the duration of this active session in an isolated Neo4j database "
-        f"(`{TEMP_NEO4J_CONFIG['username']}`). Once your session ends, all files and graph records are "
-        "permanently cleared from disk and the database."
+        """
+        <div class="sandbox-card">
+            <div class="sandbox-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                </svg>
+            </div>
+            <div>
+                <div class="sandbox-title">Session Sandbox & Ephemeral Privacy Notice</div>
+                <div class="sandbox-desc">
+                    Uploaded documents are processed entirely in an isolated runtime sandbox. All OCR text, extracted entities,
+                    hierarchical reasoning trees, and GraphRAG nodes are saved to a temporary Neo4j database instance (<code>af2857f2</code>).
+                    No data persists beyond this session. When you click <strong>End Session</strong> or exit, all artifacts are permanently purged.
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     is_report_active = st.session_state.get("temp_report_active", False) and (TEMP_PATIENT_ID in PATIENTS)
@@ -548,22 +1056,73 @@ def render_user_report_tab() -> None:
         display_label = get_display_label(TEMP_PATIENT_ID)
 
         # Active Report Banner
-        st.success(f"Active Medical Report: **{display_label}**")
+        st.markdown(
+            f"""
+            <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 10px; padding: 0.85rem 1.15rem; margin-bottom: 1.25rem; display: flex; align-items: center; justify-content: space-between;">
+                <div>
+                    <div style="font-size: 0.72rem; text-transform: uppercase; font-weight: 700; color: #34d399; letter-spacing: 0.05em;">ACTIVE REPORT INGESTED</div>
+                    <div style="font-size: 1.05rem; font-weight: 700; color: #ffffff;">{display_label}</div>
+                </div>
+                <div style="font-family: var(--font-mono); font-size: 0.72rem; color: #94a3b8; background: rgba(0, 0, 0, 0.3); padding: 0.3rem 0.6rem; border-radius: 6px;">
+                    Elapsed: {summary.get('elapsed_seconds', '—')}s
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         mcol1, mcol2, mcol3, mcol4 = st.columns(4)
         with mcol1:
-            st.metric("Pages Extracted", summary.get("pages_count", "—"))
+            st.markdown(
+                f"""
+                <div class="med-kpi-card">
+                    <div class="med-kpi-label">PAGES EXTRACTED</div>
+                    <div class="med-kpi-value">{summary.get("pages_count", "—")}</div>
+                    <div class="med-kpi-subtext">250 DPI Scans</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         with mcol2:
-            st.metric("Reports Identified", summary.get("reports_count", "—"))
+            st.markdown(
+                f"""
+                <div class="med-kpi-card">
+                    <div class="med-kpi-label">REPORTS DETECTED</div>
+                    <div class="med-kpi-value">{summary.get("reports_count", "—")}</div>
+                    <div class="med-kpi-subtext">Clinical Anchors</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         with mcol3:
-            st.metric("Clinical Chunks", summary.get("chunks_count", "—"))
+            st.markdown(
+                f"""
+                <div class="med-kpi-card">
+                    <div class="med-kpi-label">EVIDENCE CHUNKS</div>
+                    <div class="med-kpi-value">{summary.get("chunks_count", "—")}</div>
+                    <div class="med-kpi-subtext">Verifiable Grounding</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         with mcol4:
-            st.metric("Neo4j Triples (Isolated)", summary.get("triples_written", "—"))
+            st.markdown(
+                f"""
+                <div class="med-kpi-card">
+                    <div class="med-kpi-label">NEO4J TRIPLES</div>
+                    <div class="med-kpi-value" style="color: #818cf8;">{summary.get("triples_written", "—")}</div>
+                    <div class="med-kpi-subtext">Sandbox: af2857f2</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
 
         # Session Cleanup Button
         col_clean, _ = st.columns([1.5, 2])
         with col_clean:
-            if st.button("End Session & Clear Report Data", type="secondary", use_container_width=True, help="Permanently wipes all files and graph records for this report."):
+            if st.button("End Session & Purge Report", type="secondary", use_container_width=True, help="Permanently wipes all files and graph records for this report."):
                 with st.spinner("Clearing temporary session data and purging isolated Neo4j database..."):
                     cleanup_temp_patient(TEMP_PATIENT_ID)
                     st.session_state.temp_report_active = False
@@ -573,19 +1132,17 @@ def render_user_report_tab() -> None:
                 st.rerun()
 
         st.markdown("---")
-        st.markdown("#### Ask Questions About Your Report")
-        st.caption("Ask questions about your diagnoses, test results, prescribed medications, or treatment plan.")
+        st.markdown("#### Clinical Q&A Over Uploaded Report")
 
-        # Suggested Questions
-        st.markdown("**Sample Questions:**")
+        # Suggested Questions Chips
         sample_cols = st.columns(3)
         sample_q = None
-        if sample_cols[0].button("What is my diagnosis?", use_container_width=True):
-            sample_q = "What is my primary diagnosis and clinical condition?"
-        if sample_cols[1].button("Are there abnormal lab results?", use_container_width=True):
-            sample_q = "Are there any abnormal lab test results documented in my report?"
-        if sample_cols[2].button("What treatments were given?", use_container_width=True):
-            sample_q = "What treatments, medications, or chemotherapy regimens are documented?"
+        if sample_cols[0].button("Primary Diagnosis & Staging", use_container_width=True):
+            sample_q = "What is my primary diagnosis, clinical condition, and staging?"
+        if sample_cols[1].button("Abnormal Test Results & Labs", use_container_width=True):
+            sample_q = "Are there any abnormal lab test results, biomarkers, or findings documented?"
+        if sample_cols[2].button("Treatments & Prescribed Drugs", use_container_width=True):
+            sample_q = "What treatments, procedures, surgical notes, or medications are documented?"
 
         # Render conversation history for this report
         if "temp_messages" not in st.session_state:
@@ -633,22 +1190,45 @@ def render_user_report_tab() -> None:
                         st.session_state.temp_messages.append(assistant_msg)
                         render_message_content(assistant_msg)
 
-                        # Render citations expandable view
-                        all_cits = list(dict.fromkeys(graph_res.get("citations", []) + pi_res.get("citations", [])))
-                        if all_cits:
-                            st.markdown("---")
-                            render_citations_list(all_cits)
-
                     except Exception as exc:
                         st.error(f"Error analyzing report: {exc}")
 
     else:
+        # Pipeline Flow Visual
+        st.markdown("#### Document Intelligence Pipeline")
+        st.markdown(
+            """
+            <div class="pipeline-grid">
+                <div class="pipeline-step">
+                    <div class="pipeline-num">STEP 01</div>
+                    <div class="pipeline-name">250 DPI Scan</div>
+                </div>
+                <div class="pipeline-step">
+                    <div class="pipeline-num">STEP 02</div>
+                    <div class="pipeline-name">Bilingual OCR</div>
+                </div>
+                <div class="pipeline-step">
+                    <div class="pipeline-num">STEP 03</div>
+                    <div class="pipeline-name">Boundary Split</div>
+                </div>
+                <div class="pipeline-step">
+                    <div class="pipeline-num">STEP 04</div>
+                    <div class="pipeline-name">Neo4j Sandbox</div>
+                </div>
+                <div class="pipeline-step">
+                    <div class="pipeline-num">STEP 05</div>
+                    <div class="pipeline-name">Reasoning Tree</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         # Upload Form
-        st.markdown("#### Step 1: Select Your Medical Report")
         uploaded_file = st.file_uploader(
-            "Upload Medical Report PDF",
+            "Upload Clinical PDF Document",
             type=["pdf"],
-            help="Select a scanned or digital PDF document.",
+            help="Select a scanned or digital medical record PDF.",
         )
 
         if uploaded_file is not None:
@@ -671,7 +1251,7 @@ def render_user_report_tab() -> None:
                         progress_callback=status_container.write,
                     )
                     status_container.update(
-                        label=f"Ingestion Completed in {summary['elapsed_seconds']}s!",
+                        label=f"Ingestion Completed in {summary['elapsed_seconds']}s",
                         state="complete",
                         expanded=True,
                     )
@@ -695,10 +1275,13 @@ def render_user_report_tab() -> None:
 def main():
     # Page configuration
     st.set_page_config(
-        page_title="Medical Records RAG (Demo)",
+        page_title="Medical Records RAG Workstation",
         layout="wide",
         initial_sidebar_state="expanded",
     )
+
+    # Inject Custom Clinical Design System
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
     # Initialize session state (SRS FR-9.1.4)
     init_session_state()
@@ -706,21 +1289,97 @@ def main():
     # Render sidebar controls (SRS FR-9.1.1)
     mode, selected_patients, backend, compare_both = render_sidebar()
 
-    # Header & Metric Badges
-    st.title("Medical Records Retrieval-Augmented Generation")
+    # Executive App Bar Header
     st.markdown(
-        "Clinical question-answering across scanned hospital records, lab reports, "
-        "clinical flowsheets, imaging studies, and discharge summaries with **verifiable citation evidence**."
+        """
+        <div class="med-app-bar">
+            <div class="med-app-bar-brand">
+                <div class="med-brand-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+                    </svg>
+                </div>
+                <div>
+                    <div class="med-brand-title">
+                        <span>MED-RAG</span>
+                        <span style="font-weight: 300; opacity: 0.35;">//</span>
+                        <span>Clinical Intelligence Workstation</span>
+                    </div>
+                    <div class="med-brand-subtitle">
+                        Multi-Modal GraphRAG & Hierarchical Reasoning over Longitudinal Patient Records
+                    </div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric(label="Active Mode", value=mode)
-    with col2:
-        patient_str = ", ".join(get_display_label(p) for p in selected_patients) if selected_patients else "None"
-        st.metric(label="Scoped Patient(s)", value=patient_str)
+    # KPI Scope Stat Grid
+    patient_str = ", ".join(get_display_label(p) for p in selected_patients) if selected_patients else "None"
+    dev_info = get_device_info()
+    accel_text = f"GPU ({dev_info['device_name']})" if dev_info["is_gpu_available"] else "CPU Mode"
+    accel_color = "#34d399" if dev_info["is_gpu_available"] else "#94a3b8"
 
-    st.markdown("---")
+    kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
+    with kpi_col1:
+        st.markdown(
+            f"""
+            <div class="med-kpi-card">
+                <div class="med-kpi-label">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                    OPERATIONAL MODE
+                </div>
+                <div class="med-kpi-value">{mode}</div>
+                <div class="med-kpi-subtext">{'Single-Patient Focus' if mode == 'Individual' else 'Cross-Patient Review'}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with kpi_col2:
+        st.markdown(
+            f"""
+            <div class="med-kpi-card">
+                <div class="med-kpi-label">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    TARGET COHORT
+                </div>
+                <div class="med-kpi-value" title="{patient_str}">{patient_str}</div>
+                <div class="med-kpi-subtext">{f'{len(selected_patients)} record(s) loaded' if selected_patients else 'No selection'}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with kpi_col3:
+        st.markdown(
+            """
+            <div class="med-kpi-card">
+                <div class="med-kpi-label">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+                    RAG ENGINES
+                </div>
+                <div class="med-kpi-value" style="color: #38bdf8;">GraphRAG + PageIndex</div>
+                <div class="med-kpi-subtext">Dual Grounded Comparison</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with kpi_col4:
+        st.markdown(
+            f"""
+            <div class="med-kpi-card">
+                <div class="med-kpi-label">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>
+                    COMPUTE ACCELERATION
+                </div>
+                <div class="med-kpi-value" style="color: {accel_color};">{accel_text}</div>
+                <div class="med-kpi-subtext">Hardware Inference</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
     # Main Application Navigation: Clinical Chat vs User Report Upload
     tab_chat, tab_upload = st.tabs(["Clinical Chat", "Upload & Query My Report"])
