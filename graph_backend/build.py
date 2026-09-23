@@ -35,9 +35,22 @@ from llm_client import chat
 from normalize import canonicalize_lab_name, compute_abnormal_flag
 
 
-def get_driver():
+# Temporary session Neo4j instance configuration
+TEMP_NEO4J_CONFIG = {
+    "uri": "neo4j+s://af2857f2.databases.neo4j.io",
+    "username": "af2857f2",
+    "password": "nv-uzGLpiAx2_14ead9Cu1ytUwSW0mZnaTzOvF0AojQ",
+    "database": "af2857f2",
+}
+
+
+def get_driver(
+    uri: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+):
     """
-    Creates and returns an authenticated Neo4j driver using .env credentials.
+    Creates and returns an authenticated Neo4j driver using provided or .env credentials.
     Supports fallback to neo4j+ssc:// if standard SSL verification fails.
     """
     try:
@@ -47,9 +60,9 @@ def get_driver():
             "neo4j package is required. Run `pip install neo4j`."
         ) from e
 
-    uri = os.getenv("NEO4J_URI")
-    username = os.getenv("NEO4J_USERNAME", "neo4j")
-    password = os.getenv("NEO4J_PASSWORD")
+    uri = uri or os.getenv("NEO4J_URI")
+    username = username or os.getenv("NEO4J_USERNAME", "neo4j")
+    password = password or os.getenv("NEO4J_PASSWORD")
 
     if not uri or not password:
         raise ValueError(
@@ -59,6 +72,8 @@ def get_driver():
     uris_to_try = [uri]
     if uri.startswith("neo4j+s://"):
         uris_to_try.append(uri.replace("neo4j+s://", "neo4j+ssc://"))
+    elif uri.startswith("bolt+s://"):
+        uris_to_try.append(uri.replace("bolt+s://", "bolt+ssc://"))
 
     last_error: Optional[Exception] = None
     for target_uri in uris_to_try:
@@ -72,6 +87,21 @@ def get_driver():
     raise RuntimeError(
         f"Failed to connect to Neo4j instance at {uri}: {last_error}"
     ) from last_error
+
+
+def get_driver_for_patient(patient_id: str):
+    """
+    Returns appropriate driver: temporary Neo4j instance (af2857f2) for temporary session patients,
+    or the default .env instance for baseline patients.
+    """
+    from patients import is_temp_patient
+    if is_temp_patient(patient_id):
+        return get_driver(
+            uri=TEMP_NEO4J_CONFIG["uri"],
+            username=TEMP_NEO4J_CONFIG["username"],
+            password=TEMP_NEO4J_CONFIG["password"],
+        )
+    return get_driver()
 
 
 def parse_cypher_statements(cypher_text: str) -> List[str]:

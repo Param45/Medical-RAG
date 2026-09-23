@@ -49,7 +49,8 @@ def discover_patient_pdfs(raw_dir: str | Path = "data/raw") -> Dict[str, Path]:
     for file_path in sorted(raw_path.iterdir()):
         if file_path.is_file() and file_path.suffix.lower() == ".pdf":
             patient_id = file_path.stem.lower()
-            pdf_map[patient_id] = file_path
+            if not patient_id.startswith("_") and not patient_id.startswith("temp_") and not patient_id.startswith("user_"):
+                pdf_map[patient_id] = file_path
 
     return pdf_map
 

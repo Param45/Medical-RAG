@@ -131,11 +131,11 @@ class MinerUProvider(OCRProvider):
     """
 
     def __init__(self):
-        if PytorchPaddleOCR is None:
-            raise ImportError("magic_pdf is not available in the current environment.")
-        self._engines: Dict[str, PytorchPaddleOCR] = {}
+        self._engines: Dict[str, Any] = {}
 
-    def _get_engine(self, lang: str = "en") -> PytorchPaddleOCR:
+    def _get_engine(self, lang: str = "en"):
+        if PytorchPaddleOCR is None:
+            return None
         lang_key = "hi" if lang in ("hi", "devanagari", "hindi") else "en"
         if lang_key not in self._engines:
             self._engines[lang_key] = PytorchPaddleOCR(lang=lang_key)
@@ -147,9 +147,43 @@ class MinerUProvider(OCRProvider):
             match = re.search(r"page_(\d+)", img_path.name)
             page_number = int(match.group(1)) if match else 1
 
-        img_bgr = cv2.imread(str(img_path))
-        if img_bgr is None:
-            raise FileNotFoundError(f"Cannot load image at {img_path}")
+        # Fallback to PyMuPDF text extraction if PytorchPaddleOCR is not available
+        if PytorchPaddleOCR is None:
+            raw_text = ""
+            patient_id = img_path.parent.name
+            raw_pdf = img_path.parent.parent.parent / "data" / "raw" / f"{patient_id}.pdf"
+            if not raw_pdf.exists():
+                raw_pdf = Path("data/raw") / f"{patient_id}.pdf"
+
+            if raw_pdf.exists():
+                try:
+                    import fitz
+                    doc = fitz.open(str(raw_pdf))
+                    if 0 <= (page_number - 1) < len(doc):
+                        raw_text = doc[page_number - 1].get_text().strip()
+                    doc.close()
+                except Exception as e:
+                    print(f"PyMuPDF fallback failed for {raw_pdf}: {e}")
+
+            # Analyze script and table structure
+            script = "latin"
+            for ch in raw_text:
+                if is_devanagari(ch):
+                    script = "mixed" if script == "latin" else "devanagari"
+                    break
+
+            is_table = detect_table_heuristic([], raw_text)
+
+            return PageOCRResult(
+                page_number=page_number,
+                raw_text=raw_text,
+                is_table=is_table,
+                is_handwritten=False,
+                confidence=0.95 if raw_text else 0.5,
+                script=script,
+            )
+
+        import cv2
 
         # Run dual-pass strategy: English + Hindi
         eng_engine = self._get_engine("en")

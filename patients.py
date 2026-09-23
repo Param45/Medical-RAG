@@ -17,6 +17,17 @@ PATIENTS: Dict[str, str] = {
 }
 
 
+_TEMP_PATIENTS: set[str] = set()
+
+
+def is_temp_patient(patient_id: str) -> bool:
+    """Check if a patient_id corresponds to a temporary session patient."""
+    if not patient_id:
+        return False
+    norm_id = patient_id.strip().lower()
+    return norm_id.startswith("temp_") or norm_id.startswith("user_") or norm_id in _TEMP_PATIENTS
+
+
 def format_patient_label(patient_id: str) -> str:
     """
     Format a patient_id like 'patient_c' or 'john_doe' into 'Patient C' or 'John Doe'.
@@ -31,7 +42,7 @@ def format_patient_label(patient_id: str) -> str:
     return " ".join(p.capitalize() for p in parts)
 
 
-def register_patient(patient_id: str, label: Optional[str] = None) -> None:
+def register_patient(patient_id: str, label: Optional[str] = None, is_temp: bool = False) -> None:
     """
     Dynamically register a new patient ID and display label.
     """
@@ -40,6 +51,19 @@ def register_patient(patient_id: str, label: Optional[str] = None) -> None:
     norm_id = patient_id.strip().lower()
     display = label or format_patient_label(norm_id)
     PATIENTS[norm_id] = display
+    if is_temp or norm_id.startswith("temp_") or norm_id.startswith("user_"):
+        _TEMP_PATIENTS.add(norm_id)
+
+
+def unregister_patient(patient_id: str) -> None:
+    """
+    Remove a patient ID from the registry and temporary set.
+    """
+    if not patient_id:
+        return
+    norm_id = patient_id.strip().lower()
+    PATIENTS.pop(norm_id, None)
+    _TEMP_PATIENTS.discard(norm_id)
 
 
 def discover_patients(base_dir: Optional[Path] = None) -> List[str]:
@@ -60,7 +84,7 @@ def discover_patients(base_dir: Optional[Path] = None) -> List[str]:
     if raw_dir.exists():
         for pdf_file in raw_dir.glob("*.pdf"):
             pid = pdf_file.stem.strip().lower()
-            if pid and not pid.startswith("_"):
+            if pid and not pid.startswith("_") and not pid.startswith("temp_") and not pid.startswith("user_"):
                 discovered.add(pid)
 
     # Check data/evidence for JSON stores
@@ -68,14 +92,14 @@ def discover_patients(base_dir: Optional[Path] = None) -> List[str]:
     if ev_dir.exists():
         for ev_file in ev_dir.glob("*.json"):
             pid = ev_file.stem.strip().lower()
-            if pid and not pid.startswith("_"):
+            if pid and not pid.startswith("_") and not pid.startswith("temp_") and not pid.startswith("user_"):
                 discovered.add(pid)
 
     # Check data/ocr for directories
     ocr_dir = base_dir / "ocr"
     if ocr_dir.exists():
         for p_dir in ocr_dir.iterdir():
-            if p_dir.is_dir() and not p_dir.name.startswith("_"):
+            if p_dir.is_dir() and not p_dir.name.startswith("_") and not p_dir.name.startswith("temp_") and not p_dir.name.startswith("user_"):
                 discovered.add(p_dir.name.strip().lower())
 
     # Register any newly discovered patients

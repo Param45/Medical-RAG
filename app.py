@@ -36,8 +36,14 @@ from ingest import ingest_all
 from ocr import ocr_all_pages
 from orchestrate import answer_question
 from pageindex_backend.build import build_all_pageindexes
-from patients import PATIENTS, all_patient_ids, get_display_label
+from patients import PATIENTS, all_patient_ids, get_display_label, is_temp_patient
 from split_reports import split_all_reports
+from temp_session import (
+    TEMP_PATIENT_ID,
+    TEMP_NEO4J_CONFIG,
+    cleanup_temp_patient,
+    ingest_user_report,
+)
 
 
 # -----------------------------------------------------------------------------
@@ -141,6 +147,12 @@ def init_session_state() -> None:
     """
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    if "temp_messages" not in st.session_state:
+        st.session_state.temp_messages = []
+    if "temp_report_active" not in st.session_state:
+        st.session_state.temp_report_active = False
+    if "temp_report_summary" not in st.session_state:
+        st.session_state.temp_report_summary = None
 
 
 def clear_chat_history() -> None:
@@ -179,11 +191,18 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
     display_names = list(PATIENTS.values())
     selected_patients: List[str] = []
 
+    # If temporary report was recently ingested, default to it
+    default_patient_index = 0
+    if TEMP_PATIENT_ID in PATIENTS:
+        temp_label = PATIENTS[TEMP_PATIENT_ID]
+        if temp_label in display_names:
+            default_patient_index = display_names.index(temp_label)
+
     if mode == "Individual":
         selected_label = st.sidebar.selectbox(
             "Patient",
             options=display_names,
-            index=0,
+            index=default_patient_index,
             help="Select the single patient whose medical records you wish to view.",
         )
         selected_patients = resolve_selected_patients(mode, selected_label)
@@ -223,6 +242,21 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
         f"**Patients:** `{', '.join(get_display_label(p) for p in selected_patients) if selected_patients else 'None'}`"
     )
     st.sidebar.markdown("**Backend:** `Compare both Backends`")
+
+    # Temporary Neo4j indicator badge if active
+    if any(is_temp_patient(p) for p in selected_patients):
+        st.sidebar.info("Temporary Neo4j Sandbox: `af2857f2`")
+
+    # End Temporary Session button if temporary report is active
+    if TEMP_PATIENT_ID in PATIENTS:
+        st.sidebar.markdown("---")
+        if st.sidebar.button("End Session & Clear Report", use_container_width=True, help="Permanently wipes all uploaded files and temporary Neo4j records."):
+            cleanup_temp_patient(TEMP_PATIENT_ID)
+            st.session_state.temp_report_active = False
+            st.session_state.temp_report_summary = None
+            st.session_state.temp_messages = []
+            st.toast("Temporary session data and Neo4j records permanently cleared.")
+            st.rerun()
 
     return mode, selected_patients, backend, compare_both
 
@@ -473,171 +507,177 @@ def render_chat_interface(
 
 
 # -----------------------------------------------------------------------------
-# 5. Pipeline Rebuild & Admin Component (SRS §9.2, FR-9.2.1, Task 5.4)
+# 5. User Report Upload & Ephemeral Session Component
 # -----------------------------------------------------------------------------
 
-def execute_full_rebuild(progress_callback: Optional[Any] = None) -> Dict[str, Any]:
+def render_user_report_tab() -> None:
     """
-    Executes the entire Medical Records RAG pipeline end-to-end (SRS §13, Task 5.4):
-    1. Ingest raw PDFs into page images (ingest.ingest_all)
-    2. OCR extraction per patient (ocr.ocr_all_pages)
-    3. Split reports by anchor detection (split_reports.split_all_reports)
-    4. Chunking, normalization & evidence store (chunk.chunk_all_patients)
-    5. GraphRAG: schema init & build knowledge graph in Neo4j (graph_backend.build.build_all_patients)
-    6. PageIndex: build hierarchical trees (pageindex_backend.build.build_all_pageindexes)
-
-    Returns a comprehensive execution metrics summary dictionary.
+    Renders the 'Upload & Query My Report' section where users can upload their own medical
+    report PDF, run the full document intelligence pipeline into an isolated temporary
+    Neo4j database (af2857f2), query their report with grounded citations, and clean up
+    the entire session upon completion.
     """
-    def log(msg: str):
-        if progress_callback:
-            progress_callback(msg)
-
-    start_time = time.time()
-    p_ids = all_patient_ids()
-
-    # Stage 1: Ingestion
-    log("Stage 1/6: Ingesting raw PDFs from `data/raw/` into page images...")
-    ingest_res = ingest_all()
-
-    # Stage 2: OCR
-    log("Stage 2/6: Running OCR and layout analysis across all patient pages...")
-    for pid in p_ids:
-        ocr_all_pages(pid)
-
-    # Stage 3: Split Reports
-    log("Stage 3/6: Detecting report boundaries and anchoring document spans...")
-    reports_res = split_all_reports()
-
-    # Stage 4: Chunking & Evidence
-    log("Stage 4/6: Generating text chunks, normalizing clinical terms, and updating evidence store...")
-    chunks_res = chunk_all_patients()
-
-    # Stage 5: GraphRAG Knowledge Graph Build
-    log("Stage 5/6: Initializing Neo4j schema & constructing GraphRAG knowledge graph...")
-    graph_res = build_all_patients()
-
-    # Stage 6: PageIndex Tree Build
-    log("Stage 6/6: Generating LLM summaries and building PageIndex hierarchical trees...")
-    pageindex_res = build_all_pageindexes()
-
-    elapsed = round(time.time() - start_time, 2)
-    log(f"All stages completed successfully in {elapsed}s.")
-
-    # Calculate summary metrics
-    summary: Dict[str, Any] = {
-        "elapsed_seconds": elapsed,
-        "patients": {},
-        "totals": {
-            "total_pages": 0,
-            "total_reports": 0,
-            "total_chunks": 0,
-            "total_evidence": 0,
-        },
-    }
-
-    for pid in p_ids:
-        label = get_display_label(pid)
-        page_paths = ingest_res.get(pid, [])
-        pages_count = len(page_paths) if page_paths else len(list((_ROOT_DIR / "data" / "pages" / pid).glob("page_*.png")))
-        reports_count = len(reports_res.get(pid, []))
-        chunks = chunks_res.get(pid, [])
-        chunks_count = len(chunks)
-        evidence_records = load_evidence(pid)
-        evidence_count = len(evidence_records)
-
-        summary["patients"][pid] = {
-            "display_label": label,
-            "pages": pages_count,
-            "reports": reports_count,
-            "chunks": chunks_count,
-            "evidence": evidence_count,
-            "graph_stats": graph_res.get(pid, {}),
-        }
-
-        summary["totals"]["total_pages"] += pages_count
-        summary["totals"]["total_reports"] += reports_count
-        summary["totals"]["total_chunks"] += chunks_count
-        summary["totals"]["total_evidence"] += evidence_count
-
-    return summary
-
-
-def render_admin_tab() -> None:
-    """
-    Renders the Administrator management tab with one-click pipeline rebuild (SRS FR-9.2.1).
-    """
-    st.markdown("### System Administration & Index Management")
+    st.markdown("### Upload & Analyze Your Medical Report")
     st.markdown(
-        "Manage the underlying index stores and trigger complete end-to-end data pipeline rebuilds. "
-        "Rebuilding re-processes all raw PDFs in `data/raw/`, refreshes OCR extraction, resets chunking & evidence stores, "
-        "re-synchronizes the Neo4j Knowledge Graph, and regenerates PageIndex document trees."
+        "Upload a scanned or digital medical report (PDF). The system executes the full end-to-end "
+        "pipeline: OCR extraction, report boundary detection, clinical entity normalization, "
+        "knowledge graph construction in a **temporary isolated Neo4j database**, and hierarchical "
+        "reasoning tree generation."
     )
 
-    st.markdown("---")
+    # Privacy & Isolation Notice Card
+    st.info(
+        "🔒 **Session Sandbox & Data Privacy:** All uploaded reports, OCR text, and knowledge graphs "
+        f"are stored strictly for the duration of this active session in an isolated Neo4j database "
+        f"(`{TEMP_NEO4J_CONFIG['username']}`). Once your session ends, all files and graph records are "
+        "permanently cleared from disk and the database."
+    )
 
-    col1, col2 = st.columns([2, 1])
+    is_report_active = st.session_state.get("temp_report_active", False) and (TEMP_PATIENT_ID in PATIENTS)
 
-    with col1:
-        st.markdown("#### Full Pipeline Rebuild")
-        st.caption(
-            "This will sequentially execute all pipeline stages: Ingestion -> OCR -> Report Splitting -> "
-            "Chunking -> GraphRAG (Neo4j) -> PageIndex Tree."
+    if is_report_active:
+        summary = st.session_state.get("temp_report_summary") or {}
+        display_label = get_display_label(TEMP_PATIENT_ID)
+
+        # Active Report Banner
+        st.success(f"Active Medical Report: **{display_label}**")
+
+        mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+        with mcol1:
+            st.metric("Pages Extracted", summary.get("pages_count", "—"))
+        with mcol2:
+            st.metric("Reports Identified", summary.get("reports_count", "—"))
+        with mcol3:
+            st.metric("Clinical Chunks", summary.get("chunks_count", "—"))
+        with mcol4:
+            st.metric("Neo4j Triples (Isolated)", summary.get("triples_written", "—"))
+
+        # Session Cleanup Button
+        col_clean, _ = st.columns([1.5, 2])
+        with col_clean:
+            if st.button("End Session & Clear Report Data", type="secondary", use_container_width=True, help="Permanently wipes all files and graph records for this report."):
+                with st.spinner("Clearing temporary session data and purging isolated Neo4j database..."):
+                    cleanup_temp_patient(TEMP_PATIENT_ID)
+                    st.session_state.temp_report_active = False
+                    st.session_state.temp_report_summary = None
+                    st.session_state.temp_messages = []
+                st.toast("Temporary session data and Neo4j records permanently cleared.")
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("#### Ask Questions About Your Report")
+        st.caption("Ask questions about your diagnoses, test results, prescribed medications, or treatment plan.")
+
+        # Suggested Questions
+        st.markdown("**Sample Questions:**")
+        sample_cols = st.columns(3)
+        sample_q = None
+        if sample_cols[0].button("What is my diagnosis?", use_container_width=True):
+            sample_q = "What is my primary diagnosis and clinical condition?"
+        if sample_cols[1].button("Are there abnormal lab results?", use_container_width=True):
+            sample_q = "Are there any abnormal lab test results documented in my report?"
+        if sample_cols[2].button("What treatments were given?", use_container_width=True):
+            sample_q = "What treatments, medications, or chemotherapy regimens are documented?"
+
+        # Render conversation history for this report
+        if "temp_messages" not in st.session_state:
+            st.session_state.temp_messages = []
+
+        for msg in st.session_state.temp_messages:
+            render_message_content(msg)
+
+        # Question input
+        prompt = st.chat_input("Ask a question about your uploaded report...", key="temp_chat_input")
+        active_query = sample_q or prompt
+
+        if active_query:
+            # Append and display user message
+            user_msg = {"role": "user", "content": active_query}
+            st.session_state.temp_messages.append(user_msg)
+
+            with st.chat_message("user", avatar=get_chat_avatar("user")):
+                st.markdown(active_query)
+
+            with st.chat_message("assistant", avatar=get_chat_avatar("assistant")):
+                with st.spinner("Analyzing your report with GraphRAG (isolated Neo4j) and PageIndex engines..."):
+                    try:
+                        graph_res = answer_question(
+                            question=active_query,
+                            mode="individual",
+                            selected_patients=[TEMP_PATIENT_ID],
+                            backend="graph",
+                        )
+                        pi_res = answer_question(
+                            question=active_query,
+                            mode="individual",
+                            selected_patients=[TEMP_PATIENT_ID],
+                            backend="pageindex",
+                        )
+
+                        assistant_msg = {
+                            "role": "assistant",
+                            "is_comparison": True,
+                            "graph_result": graph_res,
+                            "pageindex_result": pi_res,
+                            "mode": "individual",
+                            "selected_patients": [TEMP_PATIENT_ID],
+                        }
+                        st.session_state.temp_messages.append(assistant_msg)
+                        render_message_content(assistant_msg)
+
+                        # Render citations expandable view
+                        all_cits = list(dict.fromkeys(graph_res.get("citations", []) + pi_res.get("citations", [])))
+                        if all_cits:
+                            st.markdown("---")
+                            render_citations_list(all_cits)
+
+                    except Exception as exc:
+                        st.error(f"Error analyzing report: {exc}")
+
+    else:
+        # Upload Form
+        st.markdown("#### Step 1: Select Your Medical Report")
+        uploaded_file = st.file_uploader(
+            "Upload Medical Report PDF",
+            type=["pdf"],
+            help="Select a scanned or digital PDF document.",
         )
 
-        rebuild_btn = st.button(
-            "Rebuild Index from data/raw/",
-            type="primary",
-            use_container_width=True,
-            help="Re-runs all pipeline stages end-to-end for all patients.",
-        )
+        if uploaded_file is not None:
+            st.info(f"Selected file: **{uploaded_file.name}** ({uploaded_file.size / 1024:.1f} KB)")
 
-        if rebuild_btn:
-            status_container = st.status("Initializing end-to-end pipeline rebuild...", expanded=True)
-            try:
-                summary = execute_full_rebuild(progress_callback=status_container.write)
-                status_container.update(
-                    label=f"Pipeline Rebuild Completed in {summary['elapsed_seconds']}s!",
-                    state="complete",
-                    expanded=True,
-                )
-                st.toast("Index rebuilt successfully for all patients!")
+            ingest_btn = st.button(
+                "Process & Ingest Medical Report",
+                type="primary",
+                use_container_width=True,
+                help="Runs full ingestion pipeline: OCR -> Splitting -> Chunking -> Temporary Neo4j Graph -> PageIndex.",
+            )
 
-                # Display summary table
-                st.markdown("#### Rebuild Execution Summary")
-                summary_rows = []
-                for pid, pdata in summary["patients"].items():
-                    summary_rows.append({
-                        "Patient ID": pid,
-                        "Display Label": pdata["display_label"],
-                        "Pages Extracted": pdata["pages"],
-                        "Reports Detected": pdata["reports"],
-                        "Chunks Created": pdata["chunks"],
-                        "Evidence Records": pdata["evidence"],
-                        "Graph Triples Written": pdata["graph_stats"].get("triples_written", "N/A"),
-                    })
-
-                st.table(summary_rows)
-
-            except Exception as exc:
-                status_container.update(
-                    label="Pipeline Rebuild Failed",
-                    state="error",
-                    expanded=True,
-                )
-                st.error(f"An error occurred during index rebuilding: {exc}")
-
-    with col2:
-        st.markdown("#### Local Index Status")
-        for pid in all_patient_ids():
-            label = get_display_label(pid)
-            ev_list = load_evidence(pid)
-            pi_file = _ROOT_DIR / "data" / "pageindex" / f"{pid}.json"
-            pi_exists = "Available" if pi_file.exists() else "Missing"
-
-            st.markdown(f"**{label}** (`{pid}`)")
-            st.markdown(f"- Evidence Records: `{len(ev_list)}`")
-            st.markdown(f"- PageIndex Tree: `{pi_exists}`")
-            st.markdown("")
+            if ingest_btn:
+                status_container = st.status("Initializing report ingestion pipeline...", expanded=True)
+                try:
+                    summary = ingest_user_report(
+                        pdf_bytes=uploaded_file.getvalue(),
+                        original_filename=uploaded_file.name,
+                        patient_id=TEMP_PATIENT_ID,
+                        progress_callback=status_container.write,
+                    )
+                    status_container.update(
+                        label=f"Ingestion Completed in {summary['elapsed_seconds']}s!",
+                        state="complete",
+                        expanded=True,
+                    )
+                    st.session_state.temp_report_active = True
+                    st.session_state.temp_report_summary = summary
+                    st.toast("Report ingested and ready for clinical queries!")
+                    st.rerun()
+                except Exception as exc:
+                    status_container.update(
+                        label="Report Ingestion Failed",
+                        state="error",
+                        expanded=True,
+                    )
+                    st.error(f"An error occurred during report ingestion: {exc}")
 
 
 # -----------------------------------------------------------------------------
@@ -674,8 +714,8 @@ def main():
 
     st.markdown("---")
 
-    # Main Application Navigation: Chat Interface vs Admin Management (Task 5.4)
-    tab_chat, tab_admin = st.tabs(["Clinical Chat", "Admin"])
+    # Main Application Navigation: Clinical Chat vs User Report Upload
+    tab_chat, tab_upload = st.tabs(["Clinical Chat", "Upload & Query My Report"])
 
     with tab_chat:
         render_chat_interface(
@@ -685,8 +725,8 @@ def main():
             compare_both=compare_both,
         )
 
-    with tab_admin:
-        render_admin_tab()
+    with tab_upload:
+        render_user_report_tab()
 
 
 if __name__ == "__main__":

@@ -206,8 +206,8 @@ def build_structured_facts(
     # Attempt to populate from Neo4j
     neo4j_success = False
     try:
-        from graph_backend.build import get_driver
-        driver = get_driver()
+        from graph_backend.build import get_driver_for_patient
+        driver = get_driver_for_patient(patient_id)
         with driver.session() as session:
             # 1. Chemo administrations
             c_res = session.run(
@@ -501,6 +501,19 @@ def save_tree(
     out_file = pageindex_dir / f"{patient_id}.json"
     out_file.write_text(json.dumps(tree, indent=2, ensure_ascii=False), encoding="utf-8")
     return out_file
+
+
+def build_pageindex_for_patient(
+    patient_id: str,
+    reports_dir: Optional[Path] = None,
+    pageindex_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Build and save PageIndex tree for a single patient (SRS §7.1).
+    """
+    tree = build_tree_for_patient(patient_id, reports_dir=reports_dir)
+    save_tree(patient_id, tree, pageindex_dir=pageindex_dir)
+    return tree
 
 
 def build_all_pageindexes(

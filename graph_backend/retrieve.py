@@ -27,7 +27,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 load_dotenv()
 
-from graph_backend.build import get_driver
+from graph_backend.build import get_driver, get_driver_for_patient
 from llm_client import chat
 from normalize import canonicalize_lab_name
 
@@ -42,7 +42,7 @@ def get_lab_trend(
     """
     should_close_driver = False
     if driver is None:
-        driver = get_driver()
+        driver = get_driver_for_patient(patient_id)
         should_close_driver = True
 
     query = """
@@ -91,7 +91,7 @@ def get_diagnoses(
     """
     should_close_driver = False
     if driver is None:
-        driver = get_driver()
+        driver = get_driver_for_patient(patient_id)
         should_close_driver = True
 
     query = """
@@ -136,7 +136,7 @@ def get_medication_history(
     """
     should_close_driver = False
     if driver is None:
-        driver = get_driver()
+        driver = get_driver_for_patient(patient_id)
         should_close_driver = True
 
     # 1. Medications administered
@@ -238,7 +238,7 @@ def get_staging_and_biomarkers(
     """
     should_close_driver = False
     if driver is None:
-        driver = get_driver()
+        driver = get_driver_for_patient(patient_id)
         should_close_driver = True
 
     query_biomarkers = """
@@ -315,7 +315,7 @@ def get_chemo_cycle_status(
     """
     should_close_driver = False
     if driver is None:
-        driver = get_driver()
+        driver = get_driver_for_patient(patient_id)
         should_close_driver = True
 
     results: List[Dict[str, Any]] = []
@@ -414,7 +414,7 @@ def get_suggested_vs_performed(
     """
     should_close_driver = False
     if driver is None:
-        driver = get_driver()
+        driver = get_driver_for_patient(patient_id)
         should_close_driver = True
 
     results: List[Dict[str, Any]] = []
@@ -496,7 +496,7 @@ def get_improvement_trend(
     """
     should_close_driver = False
     if driver is None:
-        driver = get_driver()
+        driver = get_driver_for_patient(patient_id)
         should_close_driver = True
 
     results: List[Dict[str, Any]] = []
@@ -596,7 +596,7 @@ def get_specific_lab_value(
     """
     should_close_driver = False
     if driver is None:
-        driver = get_driver()
+        driver = get_driver_for_patient(patient_id)
         should_close_driver = True
 
     # Canonicalize the test name to match graph nodes
@@ -769,7 +769,7 @@ def open_ended_query(
     """
     should_close_driver = False
     if driver is None:
-        driver = get_driver()
+        driver = get_driver_for_patient(patient_ids[0]) if patient_ids else get_driver()
         should_close_driver = True
 
     schema_description = """
@@ -865,22 +865,19 @@ def retrieve(
     intent = classify_intent(question)
     print(f"[*] Graph Retrieval Intent: '{intent}' for patients: {patient_ids}")
 
-    should_close_driver = False
-    if driver is None:
-        driver = get_driver()
-        should_close_driver = True
-
     all_facts: List[Dict[str, Any]] = []
 
-    try:
-        # Loop per patient_id (SRS FR-6.2.4)
-        for p_id in patient_ids:
+    # Loop per patient_id (SRS FR-6.2.4)
+    for p_id in patient_ids:
+        p_driver = driver or get_driver_for_patient(p_id)
+        p_should_close = (driver is None)
+        try:
             if intent == "chemo_cycle_status":
-                facts = get_chemo_cycle_status(patient_id=p_id, driver=driver)
+                facts = get_chemo_cycle_status(patient_id=p_id, driver=p_driver)
                 all_facts.extend(facts)
 
             elif intent == "suggested_vs_performed":
-                facts = get_suggested_vs_performed(patient_id=p_id, driver=driver)
+                facts = get_suggested_vs_performed(patient_id=p_id, driver=p_driver)
                 all_facts.extend(facts)
 
             elif intent == "improvement_trend":
@@ -890,7 +887,7 @@ def retrieve(
                     if candidate in question.lower():
                         test_match = candidate
                         break
-                facts = get_improvement_trend(patient_id=p_id, test_name=test_match, driver=driver)
+                facts = get_improvement_trend(patient_id=p_id, test_name=test_match, driver=p_driver)
                 all_facts.extend(facts)
 
             elif intent == "specific_lab_value":
@@ -908,7 +905,7 @@ def retrieve(
                 date_patterns = re.findall(r'(\d{4}[-/]\d{1,2}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s*\d{4}|\d{1,2}[-/]\d{4})', question.lower())
                 if date_patterns:
                     date_match = date_patterns[0]
-                facts = get_specific_lab_value(patient_id=p_id, test_name=test_match, target_date=date_match, driver=driver)
+                facts = get_specific_lab_value(patient_id=p_id, test_name=test_match, target_date=date_match, driver=p_driver)
                 all_facts.extend(facts)
 
             elif intent == "lab_trend":
@@ -918,29 +915,29 @@ def retrieve(
                     if candidate in question.lower():
                         test_match = candidate
                         break
-                facts = get_lab_trend(patient_id=p_id, test_name=test_match, driver=driver)
+                facts = get_lab_trend(patient_id=p_id, test_name=test_match, driver=p_driver)
                 all_facts.extend(facts)
 
             elif intent == "diagnosis_list":
-                facts = get_diagnoses(patient_id=p_id, driver=driver)
+                facts = get_diagnoses(patient_id=p_id, driver=p_driver)
                 all_facts.extend(facts)
 
             elif intent == "medication_history":
-                facts = get_medication_history(patient_id=p_id, driver=driver)
+                facts = get_medication_history(patient_id=p_id, driver=p_driver)
                 all_facts.extend(facts)
 
             elif intent == "staging_biomarker":
-                facts = get_staging_and_biomarkers(patient_id=p_id, driver=driver)
+                facts = get_staging_and_biomarkers(patient_id=p_id, driver=p_driver)
                 all_facts.extend(facts)
 
             else:
                 # Open-ended query
-                facts = open_ended_query(patient_ids=[p_id], question=question, driver=driver)
+                facts = open_ended_query(patient_ids=[p_id], question=question, driver=p_driver)
                 all_facts.extend(facts)
 
-    finally:
-        if should_close_driver and driver is not None:
-            driver.close()
+        finally:
+            if p_should_close and p_driver is not None:
+                p_driver.close()
 
     return all_facts
 
