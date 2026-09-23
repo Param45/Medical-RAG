@@ -700,7 +700,12 @@ def llm_normalize(
         if not response or response.strip() == "null":
             return None
         raw_resp = response.strip()
-        if raw_resp.startswith("```"):
+        # Remove any reasoning/thought tags from local model if present
+        raw_resp = re.sub(r"<thought>.*?</thought>", "", raw_resp, flags=re.DOTALL).strip()
+        match = re.search(r"(\{.*\})", raw_resp, re.DOTALL)
+        if match:
+            raw_resp = match.group(1)
+        elif raw_resp.startswith("```"):
             raw_resp = re.sub(r"^```(?:json)?\s*", "", raw_resp)
             raw_resp = re.sub(r"\s*```$", "", raw_resp)
         data = json.loads(raw_resp.strip())

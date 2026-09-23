@@ -245,6 +245,23 @@ def _call_openai(
     return choice.message.content or ""
 
 
+# ==============================================================================
+# GLOBAL LLM ROUTING TOGGLE (Code-Level Only)
+#
+# By default, the Local LLM (MedGemma GGUF via llama-cpp-python) is used EVERYWHERE
+# across all pipeline stages (ingestion, graph build, PageIndex, normalization,
+# query classification, and final clinical answer synthesis).
+#
+# If the Local LLM degrades results or makes things worse on heavy ingestion tasks,
+# you can switch back to the External Cloud LLM (Gemini) by changing this single
+# line in code:
+#     USE_LOCAL_LLM_EVERYWHERE = False
+#
+# Note: This is an internal developer decision and is NOT exposed in the UI.
+# ==============================================================================
+USE_LOCAL_LLM_EVERYWHERE: bool = True
+
+
 def chat(
     messages: List[Dict[str, str]],
     system: Optional[str] = None,
@@ -252,20 +269,25 @@ def chat(
     provider: Optional[str] = None,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
+    use_external: bool = False,
     max_retries: int = 1,
     retry_delay_seconds: float = 1.0,
 ) -> str:
     """
     Unified LLM chat wrapper (SRS FR-5.6.1).
 
+    By default, routes ALL tasks to the Local LLM (MedGemma GGUF).
+    If USE_LOCAL_LLM_EVERYWHERE is set to False (or use_external=True is passed),
+    ingestion / build tasks route to the configured external cloud provider (Gemini).
+
     Args:
         messages: List of message dicts with keys 'role' ('user'|'assistant'|'model') and 'content'.
         system: Optional system instruction prompt.
         task: Optional task type ('build' / 'ingestion' vs 'inference' / 'retrieve').
-              Defaults to environment routing (Gemini for build, Local LLM for inference).
         provider: Optional explicit provider override ('gemini', 'local', 'anthropic', 'openai').
         model: Optional explicit model override.
         api_key: Optional explicit API key override.
+        use_external: Optional flag to route this specific call to the External Cloud LLM.
         max_retries: Number of retry attempts on transient failures (default: 1).
         retry_delay_seconds: Delay before retry in seconds.
 
@@ -279,11 +301,22 @@ def chat(
     task_norm = (task or os.getenv("LLM_TASK", "")).strip().lower()
 
     if not provider:
-        if task_norm in ("build", "ingestion", "rebuild"):
+        if USE_LOCAL_LLM_EVERYWHERE and not use_external:
+            # Default everywhere to Local LLM
+            provider = os.getenv("LLM_PROVIDER", "local").strip().lower()
+        elif use_external:
+            # Explicit call-level override for external LLM
             provider = (
-                os.getenv("LLM_BUILD_PROVIDER")
+                os.getenv("LLM_PROVIDER_EXTERNAL")
+                or os.getenv("LLM_BUILD_PROVIDER")
+                or "gemini"
+            ).strip().lower()
+        elif task_norm in ("build", "ingestion", "rebuild"):
+            # When USE_LOCAL_LLM_EVERYWHERE is False, route build tasks to external LLM
+            provider = (
+                os.getenv("LLM_PROVIDER_EXTERNAL")
+                or os.getenv("LLM_BUILD_PROVIDER")
                 or os.getenv("LLM_PROVIDER_INGESTION")
-                or os.getenv("LLM_PROVIDER_EXTERNAL")
                 or "gemini"
             ).strip().lower()
         elif task_norm in ("inference", "query", "retrieve"):
@@ -296,12 +329,18 @@ def chat(
             provider = os.getenv("LLM_PROVIDER", "local").strip().lower()
 
     if not model:
-        if task_norm in ("build", "ingestion", "rebuild"):
+        if USE_LOCAL_LLM_EVERYWHERE and not use_external and provider in ("local", "llama_cpp", "llama-cpp", "gguf", "medgemma"):
             model = (
-                os.getenv("LLM_BUILD_MODEL")
+                os.getenv("LLM_MODEL")
+                or os.getenv("LOCAL_MODEL_PATH")
+                or "medgemma-1.5-4b-it-Q4_K_M.gguf"
+            ).strip()
+        elif use_external or (not USE_LOCAL_LLM_EVERYWHERE and task_norm in ("build", "ingestion", "rebuild")):
+            model = (
+                os.getenv("LLM_MODEL_EXTERNAL")
+                or os.getenv("LLM_BUILD_MODEL")
                 or os.getenv("LLM_MODEL_INGESTION")
-                or os.getenv("LLM_MODEL_EXTERNAL")
-                or ("gemini-3.1-flash-lite" if provider in ("gemini", "google") else "")
+                or ("gemini-3.5-flash-lite" if provider in ("gemini", "google") else "")
             ).strip()
         elif task_norm in ("inference", "query", "retrieve"):
             model = (
@@ -313,10 +352,10 @@ def chat(
             model = os.getenv("LLM_MODEL", "").strip()
 
     if not api_key:
-        if task_norm in ("build", "ingestion", "rebuild"):
+        if use_external or (not USE_LOCAL_LLM_EVERYWHERE and task_norm in ("build", "ingestion", "rebuild")):
             api_key = (
-                os.getenv("LLM_BUILD_API_KEY")
-                or os.getenv("LLM_API_KEY")
+                os.getenv("LLM_API_KEY")
+                or os.getenv("LLM_BUILD_API_KEY")
                 or ""
             ).strip()
         elif task_norm in ("inference", "query", "retrieve"):
@@ -384,7 +423,7 @@ def chat_build(
     system: Optional[str] = None,
     **kwargs,
 ) -> str:
-    """Convenience chat wrapper for rebuilding/ingestion tasks (defaults to Gemini)."""
+    """Convenience chat wrapper for rebuilding/ingestion tasks (Local LLM by default, or External LLM if USE_LOCAL_LLM_EVERYWHERE=False)."""
     return chat(messages, system=system, task="build", **kwargs)
 
 

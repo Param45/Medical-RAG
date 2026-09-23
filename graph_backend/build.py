@@ -296,7 +296,14 @@ def extract_triples(
             return []
 
         raw_resp = response_text.strip()
-        if raw_resp.startswith("```"):
+        # Remove any reasoning/thought tags from local model if present
+        raw_resp = re.sub(r"<thought>.*?</thought>", "", raw_resp, flags=re.DOTALL).strip()
+
+        # Extract JSON array block if enclosed in text/markdown
+        match = re.search(r"(\[\s*\{.*\}\s*\])", raw_resp, re.DOTALL)
+        if match:
+            raw_resp = match.group(1)
+        elif raw_resp.startswith("```"):
             raw_resp = re.sub(r"^```(?:json)?\s*", "", raw_resp)
             raw_resp = re.sub(r"\s*```$", "", raw_resp)
 

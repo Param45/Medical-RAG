@@ -64,6 +64,33 @@ class TestPageIndexSummaries:
         assert "no reports documented" in summary
         mock_chat.assert_not_called()
 
+    @patch("pageindex_backend.build.chat")
+    def test_generate_report_summary_strips_thought_tags(self, mock_chat):
+        mock_chat.return_value = "<thought>Thinking about patient scan...</thought>Patient underwent CECT scan showing stable metastatic disease."
+        summary = generate_report_summary(
+            report_id="report_0001",
+            report_type="RADIOLOGY_CECT",
+            report_date="2018-03-20",
+            text="Some report text",
+        )
+        assert summary == "Patient underwent CECT scan showing stable metastatic disease."
+        assert "<thought>" not in summary
+
+    @patch("pageindex_backend.build.chat")
+    def test_generate_root_summary_strips_thought_tags(self, mock_chat):
+        mock_chat.return_value = "<thought>Synthesizing overview...</thought>Overall clinical summary of Patient A with breast cancer."
+        report_nodes = [
+            {
+                "node_id": "report_0001",
+                "report_type": "RADIOLOGY_CECT",
+                "report_date": "2018-03-20",
+                "summary": "Stable metastatic lesions.",
+            }
+        ]
+        summary = generate_root_summary("patient_a", report_nodes)
+        assert summary == "Overall clinical summary of Patient A with breast cancer."
+        assert "<thought>" not in summary
+
 
 class TestPageIndexTreeBuild:
     """Tests for 3-level tree construction and schema validation."""

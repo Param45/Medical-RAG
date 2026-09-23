@@ -89,6 +89,7 @@ def generate_report_summary(
             max_retries=2,
             retry_delay_seconds=4.0,
         ).strip()
+        summary = re.sub(r"<thought>.*?</thought>", "", summary, flags=re.DOTALL).strip()
         return summary if summary else f"{report_type} ({report_date or 'undated'})."
     except Exception as exc:
         print(f"Warning: Failed to generate summary for {report_id}: {exc}")
@@ -143,6 +144,7 @@ def generate_root_summary(
             max_retries=2,
             retry_delay_seconds=4.0,
         ).strip()
+        summary = re.sub(r"<thought>.*?</thought>", "", summary, flags=re.DOTALL).strip()
         return summary if summary else f"Clinical record overview for {display_label}."
     except Exception as exc:
         print(f"Warning: Failed to generate root summary for {patient_id}: {exc}")

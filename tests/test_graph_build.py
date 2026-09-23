@@ -109,6 +109,25 @@ class TestExtractTriples:
         assert len(triples) == 1
         assert triples[0]["relation"] == "STATES_DIAGNOSIS"
 
+    @patch("graph_backend.build.chat")
+    def test_extract_triples_thought_tags_and_preamble(self, mock_chat):
+        mock_chat.return_value = """<thought>Extracting clinical relationships...</thought>
+Here are the extracted triples:
+[
+  {
+    "subject_label": "Report",
+    "subject_name": "report_0001",
+    "relation": "STATES_DIAGNOSIS",
+    "object_label": "Diagnosis",
+    "object_name": "Invasive Ductal Carcinoma",
+    "properties": {}
+  }
+]"""
+        triples = extract_triples("raw chunk text", [], {})
+        assert len(triples) == 1
+        assert triples[0]["relation"] == "STATES_DIAGNOSIS"
+        assert triples[0]["object_name"] == "Invasive Ductal Carcinoma"
+
 
 class TestWriteTriplesToNeo4j:
     """Tests for write_triples_to_neo4j Cypher generation and execution."""

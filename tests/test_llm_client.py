@@ -255,38 +255,48 @@ class TestLLMNormalizeIntegration:
         result = llm_normalize("some term", context="some context")
         assert result is None
 
+    @patch("llm_client.chat")
+    def test_llm_normalize_with_thought_tags_and_preamble(self, mock_chat):
+        mock_chat.return_value = (
+            "<thought>Analyzing clinical context...</thought>\n"
+            "Here is the normalized result:\n"
+            '{"canonical": "Paclitaxel", "type": "Medication"}'
+        )
+
+        result = llm_normalize("pacli", context="Administer pacli 80mg", base_confidence=1.0)
+
+        assert result is not None
+        assert result.normalized_term == "Paclitaxel"
+        assert result.entity_type == "Medication"
+
 
 class TestTaskRouting:
-    """Tests for task-specific routing: build -> Gemini, inference -> Local."""
+    """Tests for task-specific routing: Local LLM everywhere by default, minimal-change external fallback."""
 
     @patch("llm_client._call_gemini")
     @patch("llm_client._call_local")
-    def test_task_build_routes_to_gemini(self, mock_local, mock_gemini, monkeypatch):
-        monkeypatch.setenv("LLM_BUILD_PROVIDER", "gemini")
-        monkeypatch.setenv("LLM_BUILD_MODEL", "gemini-3.1-flash-lite")
-        monkeypatch.setenv("LLM_API_KEY", "test_gemini_key")
+    def test_default_local_everywhere_routes_build_to_local(self, mock_local, mock_gemini, monkeypatch):
         monkeypatch.setenv("LLM_PROVIDER", "local")
+        monkeypatch.setenv("LLM_MODEL", "medgemma-1.5-4b-it-Q4_K_M.gguf")
 
-        mock_gemini.return_value = "Gemini build output"
+        mock_local.return_value = "Local build output"
 
         messages = [{"role": "user", "content": "Extract triples"}]
         res = llm_client.chat(messages, task="build")
 
-        assert res == "Gemini build output"
-        mock_gemini.assert_called_once_with(
-            api_key="test_gemini_key",
-            model="gemini-3.1-flash-lite",
+        assert res == "Local build output"
+        mock_local.assert_called_once_with(
+            model="medgemma-1.5-4b-it-Q4_K_M.gguf",
             messages=messages,
             system=None,
         )
-        mock_local.assert_not_called()
+        mock_gemini.assert_not_called()
 
     @patch("llm_client._call_gemini")
     @patch("llm_client._call_local")
-    def test_task_inference_routes_to_local(self, mock_local, mock_gemini, monkeypatch):
-        monkeypatch.setenv("LLM_BUILD_PROVIDER", "gemini")
-        monkeypatch.setenv("LLM_INFERENCE_PROVIDER", "local")
-        monkeypatch.setenv("LLM_INFERENCE_MODEL", "medgemma-1.5-4b-it-Q4_K_M.gguf")
+    def test_default_local_everywhere_routes_inference_to_local(self, mock_local, mock_gemini, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "local")
+        monkeypatch.setenv("LLM_MODEL", "medgemma-1.5-4b-it-Q4_K_M.gguf")
 
         mock_local.return_value = "Local inference output"
 
@@ -302,22 +312,64 @@ class TestTaskRouting:
         mock_gemini.assert_not_called()
 
     @patch("llm_client._call_gemini")
-    def test_chat_build_convenience_helper(self, mock_gemini, monkeypatch):
-        monkeypatch.setenv("LLM_BUILD_PROVIDER", "gemini")
-        monkeypatch.setenv("LLM_BUILD_MODEL", "gemini-3.1-flash-lite")
-        monkeypatch.setenv("LLM_API_KEY", "test_key")
+    @patch("llm_client._call_local")
+    def test_use_external_flag_routes_to_gemini(self, mock_local, mock_gemini, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER_EXTERNAL", "gemini")
+        monkeypatch.setenv("LLM_MODEL_EXTERNAL", "gemini-3.5-flash-lite")
+        monkeypatch.setenv("LLM_API_KEY", "test_gemini_key")
 
-        mock_gemini.return_value = "Build summary"
+        mock_gemini.return_value = "External Gemini output"
+
+        messages = [{"role": "user", "content": "Extract triples"}]
+        res = llm_client.chat(messages, task="build", use_external=True)
+
+        assert res == "External Gemini output"
+        mock_gemini.assert_called_once_with(
+            api_key="test_gemini_key",
+            model="gemini-3.5-flash-lite",
+            messages=messages,
+            system=None,
+        )
+        mock_local.assert_not_called()
+
+    @patch("llm_client._call_gemini")
+    @patch("llm_client._call_local")
+    def test_toggle_off_routes_build_to_gemini(self, mock_local, mock_gemini, monkeypatch):
+        monkeypatch.setattr(llm_client, "USE_LOCAL_LLM_EVERYWHERE", False)
+        monkeypatch.setenv("LLM_BUILD_PROVIDER", "gemini")
+        monkeypatch.setenv("LLM_BUILD_MODEL", "gemini-3.5-flash-lite")
+        monkeypatch.setenv("LLM_API_KEY", "test_gemini_key")
+
+        mock_gemini.return_value = "Gemini build output"
+
+        messages = [{"role": "user", "content": "Extract triples"}]
+        res = llm_client.chat(messages, task="build")
+
+        assert res == "Gemini build output"
+        mock_gemini.assert_called_once_with(
+            api_key="test_gemini_key",
+            model="gemini-3.5-flash-lite",
+            messages=messages,
+            system=None,
+        )
+        mock_local.assert_not_called()
+
+    @patch("llm_client._call_local")
+    def test_chat_build_convenience_helper_defaults_to_local(self, mock_local, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "local")
+        monkeypatch.setenv("LLM_MODEL", "medgemma-1.5-4b-it-Q4_K_M.gguf")
+
+        mock_local.return_value = "Build summary"
         messages = [{"role": "user", "content": "Summarize"}]
         res = llm_client.chat_build(messages)
 
         assert res == "Build summary"
-        mock_gemini.assert_called_once()
+        mock_local.assert_called_once()
 
     @patch("llm_client._call_local")
     def test_chat_inference_convenience_helper(self, mock_local, monkeypatch):
-        monkeypatch.setenv("LLM_INFERENCE_PROVIDER", "local")
-        monkeypatch.setenv("LLM_INFERENCE_MODEL", "medgemma-1.5-4b-it-Q4_K_M.gguf")
+        monkeypatch.setenv("LLM_PROVIDER", "local")
+        monkeypatch.setenv("LLM_MODEL", "medgemma-1.5-4b-it-Q4_K_M.gguf")
 
         mock_local.return_value = "Inference answer"
         messages = [{"role": "user", "content": "Answer question"}]
