@@ -16,6 +16,11 @@ import sys
 import time
 from pathlib import Path
 
+# Ensure project root is in sys.path
+_ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+if str(_ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_ROOT_DIR))
+
 # Ensure UTF-8 stdout on Windows
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -24,7 +29,7 @@ import cv2
 import numpy as np
 
 # Ensure magic-pdf config points to cpu and local models directory
-os.environ.setdefault("MINERU_TOOLS_CONFIG_JSON", str(Path(__file__).parent / "magic-pdf.json"))
+os.environ.setdefault("MINERU_TOOLS_CONFIG_JSON", str(_ROOT_DIR / "magic-pdf.json"))
 
 try:
     from magic_pdf.model.sub_modules.ocr.paddleocr2pytorch.pytorch_paddle import PytorchPaddleOCR

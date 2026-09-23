@@ -152,10 +152,21 @@ def sync_mineru_config(config_path: Optional[Path] = None) -> Path:
     if cfg_path.exists():
         try:
             data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            updated = False
             if data.get("device-mode") != desired_mode:
                 data["device-mode"] = desired_mode
+                updated = True
+
+            current_models = data.get("models-dir", "")
+            if not current_models or not Path(current_models).exists():
+                local_models_dir = (_ROOT_DIR / "models").resolve()
+                if local_models_dir.exists():
+                    data["models-dir"] = str(local_models_dir)
+                    updated = True
+
+            if updated:
                 cfg_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-                print(f"[DeviceUtils] Updated {cfg_path.name} device-mode to '{desired_mode}'")
+                print(f"[DeviceUtils] Synchronized {cfg_path.name} (mode: '{desired_mode}')")
         except Exception as exc:
             print(f"[DeviceUtils] Warning: could not update {cfg_path}: {exc}")
 

@@ -1,5 +1,5 @@
 {
-  "models-dir": "D:\\Extras\\Deecogs\\Medical RAG\\models",
+  "models-dir": "./models",
   "device-mode": "cpu",
   "table-config": {
     "model": "rapid_table",

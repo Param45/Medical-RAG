@@ -9,7 +9,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Load .env file
-dotenv_path = Path(__file__).parent / ".env"
+_ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+dotenv_path = _ROOT_DIR / ".env"
 if not dotenv_path.exists():
     print(f"[ERROR] .env file not found at: {dotenv_path}", file=sys.stderr)
     print("Please ensure .env is created and filled with credentials.", file=sys.stderr)

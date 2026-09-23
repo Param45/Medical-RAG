@@ -12,7 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Ensure project root is in sys.path
-_ROOT_DIR = Path(__file__).resolve().parent
+_ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
 
@@ -20,7 +20,7 @@ if str(_ROOT_DIR) not in sys.path:
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-load_dotenv()
+load_dotenv(_ROOT_DIR / ".env")
 
 from graph_backend.retrieve import retrieve
 
