@@ -15,7 +15,7 @@ data/ocr/
 
 # Local model weights (large binary assets)
 models/
-
+docs/
 # Python cache
 __pycache__/
 *.pyc
