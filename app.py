@@ -243,6 +243,14 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
     )
     st.sidebar.markdown("**Backend:** `Compare both Backends`")
 
+    # Hardware compute device indicator
+    from device_utils import get_device_info
+    dev_info = get_device_info()
+    if dev_info["is_gpu_available"]:
+        st.sidebar.markdown(f"**Compute:** `GPU ({dev_info['device_name']})`")
+    else:
+        st.sidebar.markdown("**Compute:** `CPU Mode`")
+
     # Temporary Neo4j indicator badge if active
     if any(is_temp_patient(p) for p in selected_patients):
         st.sidebar.info("Temporary Neo4j Sandbox: `af2857f2`")

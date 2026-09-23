@@ -24,8 +24,12 @@ except ImportError:
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-# Ensure magic-pdf config points to CPU and local models directory
-os.environ.setdefault("MINERU_TOOLS_CONFIG_JSON", str(Path(__file__).parent / "magic-pdf.json"))
+# Ensure magic-pdf config is synchronized with detected hardware (CUDA or CPU)
+try:
+    from device_utils import sync_mineru_config
+    sync_mineru_config()
+except Exception:
+    os.environ.setdefault("MINERU_TOOLS_CONFIG_JSON", str(Path(__file__).parent / "magic-pdf.json"))
 
 try:
     from magic_pdf.model.sub_modules.ocr.paddleocr2pytorch.pytorch_paddle import PytorchPaddleOCR

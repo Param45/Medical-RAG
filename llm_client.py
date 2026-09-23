@@ -70,11 +70,13 @@ def _get_local_llama_client(model_path: Optional[str] = None) -> Any:
             "Install it via `pip install llama-cpp-python`."
         ) from e
 
+    from device_utils import get_llama_gpu_layers
+
     n_ctx = int(os.getenv("LOCAL_LLM_N_CTX", "4096"))
     n_threads_env = os.getenv("LOCAL_LLM_N_THREADS")
     n_threads = int(n_threads_env) if n_threads_env and n_threads_env.isdigit() else None
+    n_gpu_layers = get_llama_gpu_layers()
 
-    print(f"[LOCAL LLM] Initializing Llama model from: {resolved_path} (n_ctx={n_ctx})")
     model_kwargs: Dict[str, Any] = {
         "model_path": resolved_path,
         "n_ctx": n_ctx,
@@ -83,6 +85,20 @@ def _get_local_llama_client(model_path: Optional[str] = None) -> Any:
     if n_threads is not None:
         model_kwargs["n_threads"] = n_threads
 
+    if n_gpu_layers != 0:
+        model_kwargs["n_gpu_layers"] = n_gpu_layers
+        print(f"[LOCAL LLM] Attempting GPU acceleration with n_gpu_layers={n_gpu_layers} on: {resolved_path}")
+        try:
+            _LOCAL_LLAMA_MODEL = Llama(**model_kwargs)
+            _LOCAL_LLAMA_MODEL_PATH = resolved_path
+            print(f"[LOCAL LLM] Successfully initialized Llama model with GPU acceleration.")
+            return _LOCAL_LLAMA_MODEL
+        except Exception as exc:
+            print(f"[LOCAL LLM] GPU initialization failed ({exc}). Gracefully falling back to CPU mode...")
+            model_kwargs["n_gpu_layers"] = 0
+
+    print(f"[LOCAL LLM] Initializing Llama model in CPU mode from: {resolved_path} (n_ctx={n_ctx})")
+    model_kwargs["n_gpu_layers"] = 0
     _LOCAL_LLAMA_MODEL = Llama(**model_kwargs)
     _LOCAL_LLAMA_MODEL_PATH = resolved_path
     return _LOCAL_LLAMA_MODEL
