@@ -23,6 +23,9 @@ COPY requirements-backend.txt .
 RUN pip install --no-cache-dir -U pip wheel && \
     pip install --no-cache-dir -r requirements-backend.txt --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 
+# Copy heavy model weights first into their own dedicated layer (cached across code edits)
+COPY models/ ./models/
+
 # Copy application source code and pre-indexed data structures
 COPY . .
 
