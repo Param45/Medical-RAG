@@ -30,22 +30,113 @@ if hasattr(sys.stdout, "reconfigure"):
 
 load_dotenv()
 
-from chunk import chunk_all_patients
+import api_client
 from device_utils import get_device_info
-from evidence_store import EvidenceRecord, get_evidence_by_id, load_evidence
-from graph_backend.build import build_all_patients, run_schema_init
-from ingest import ingest_all
-from ocr import ocr_all_pages
-from orchestrate import answer_question
-from pageindex_backend.build import build_all_pageindexes
 from patients import PATIENTS, all_patient_ids, get_display_label, is_temp_patient
-from split_reports import split_all_reports
-from temp_session import (
-    TEMP_PATIENT_ID,
-    TEMP_NEO4J_CONFIG,
-    cleanup_temp_patient,
-    ingest_user_report,
-)
+
+# Local backend modules (active in local direct mode, optional on Streamlit Community Cloud)
+try:
+    from orchestrate import answer_question
+except ImportError:
+    answer_question = None
+
+try:
+    from evidence_store import EvidenceRecord, get_evidence_by_id, load_evidence
+except ImportError:
+    EvidenceRecord = None
+    get_evidence_by_id = None
+    load_evidence = None
+
+try:
+    from temp_session import (
+        TEMP_PATIENT_ID,
+        TEMP_NEO4J_CONFIG,
+        cleanup_temp_patient,
+        ingest_user_report,
+    )
+except ImportError:
+    TEMP_PATIENT_ID = "temp_user_report"
+    TEMP_NEO4J_CONFIG = {}
+    cleanup_temp_patient = None
+    ingest_user_report = None
+
+
+# -----------------------------------------------------------------------------
+# Deployment-Aware Execution Dispatchers (Local Direct vs Azure REST API)
+# -----------------------------------------------------------------------------
+def execute_answer_question(
+    question: str,
+    mode: str,
+    selected_patients: List[str],
+    backend: str,
+) -> Dict[str, Any]:
+    """Executes query either via remote Azure REST API or local orchestrator."""
+    if api_client.is_remote_mode():
+        return api_client.send_query(
+            question=question,
+            mode=mode,
+            selected_patients=selected_patients,
+            backend=backend,
+        )
+    elif answer_question is not None:
+        return answer_question(
+            question=question,
+            mode=mode,
+            selected_patients=selected_patients,
+            backend=backend,
+        )
+    else:
+        raise RuntimeError("No Azure backend configured and local orchestrator is unavailable.")
+
+
+def execute_cleanup_temp_session(patient_id: str = TEMP_PATIENT_ID) -> Dict[str, Any]:
+    """Wipes temporary session data either on Azure or locally."""
+    if api_client.is_remote_mode():
+        return api_client.cleanup_temp_session()
+    elif cleanup_temp_patient is not None:
+        return cleanup_temp_patient(patient_id=patient_id)
+    return {"status": "skipped"}
+
+
+def execute_ingest_user_report(
+    pdf_bytes: bytes,
+    original_filename: str = "report.pdf",
+    patient_id: str = TEMP_PATIENT_ID,
+    progress_callback=None,
+) -> Dict[str, Any]:
+    """Ingests uploaded PDF either by dispatching to Azure API or running local pipeline."""
+    if api_client.is_remote_mode():
+        if progress_callback:
+            progress_callback("Uploading PDF to Azure Docker backend & running clinical pipeline...")
+        resp = api_client.upload_temp_report(pdf_bytes=pdf_bytes, filename=original_filename)
+        return resp.get("summary", resp)
+    elif ingest_user_report is not None:
+        return ingest_user_report(
+            pdf_bytes=pdf_bytes,
+            original_filename=original_filename,
+            patient_id=patient_id,
+            progress_callback=progress_callback,
+        )
+    else:
+        raise RuntimeError("No Azure backend configured and local ingestion pipeline is unavailable.")
+
+
+def execute_get_evidence_by_id(evidence_id: str, patient_id: Optional[str] = None) -> Any:
+    """Retrieves evidence record either via Azure REST API or local evidence store."""
+    if api_client.is_remote_mode():
+        remote_data = api_client.fetch_evidence(evidence_id)
+        if remote_data:
+            class RemoteEvidence:
+                def __init__(self, data: Dict[str, Any]):
+                    for k, v in data.items():
+                        setattr(self, k, v)
+                    if not hasattr(self, "page_image_path"):
+                        self.page_image_path = data.get("image_path")
+            return RemoteEvidence(remote_data)
+        return None
+    elif get_evidence_by_id is not None and patient_id:
+        return get_evidence_by_id(patient_id=patient_id, evidence_id=evidence_id)
+    return None
 
 
 # -----------------------------------------------------------------------------
@@ -690,6 +781,9 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
     dev_info = get_device_info()
     accel_badge = f"GPU ({dev_info['device_name']})" if dev_info["is_gpu_available"] else "CPU Mode"
 
+    deployment_label = "Azure Docker Backend" if api_client.is_remote_mode() else "Local Direct"
+    deployment_color = "#38bdf8" if api_client.is_remote_mode() else "#a855f7"
+
     st.sidebar.markdown(
         f"""
         <div style="background: rgba(17, 24, 39, 0.8); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 0.75rem 0.85rem; font-size: 0.78rem; line-height: 1.6;">
@@ -699,6 +793,8 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
             <div style="color: #ffffff; font-weight: 600; margin-bottom: 0.4rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{patient_display}">{patient_display}</div>
             <div style="color: #94a3b8; font-size: 0.68rem; text-transform: uppercase; font-weight: 600;">Engine Evaluation</div>
             <div style="color: #38bdf8; font-weight: 600; margin-bottom: 0.4rem;">Dual Comparison</div>
+            <div style="color: #94a3b8; font-size: 0.68rem; text-transform: uppercase; font-weight: 600;">Architecture</div>
+            <div style="color: {deployment_color}; font-weight: 600; margin-bottom: 0.4rem;">{deployment_label}</div>
             <div style="color: #94a3b8; font-size: 0.68rem; text-transform: uppercase; font-weight: 600;">Compute</div>
             <div style="color: {'#34d399' if dev_info['is_gpu_available'] else '#94a3b8'}; font-weight: 600;">{accel_badge}</div>
         </div>
@@ -721,7 +817,7 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
     if TEMP_PATIENT_ID in PATIENTS:
         st.sidebar.markdown("---")
         if st.sidebar.button("End Session & Purge Report", use_container_width=True, help="Permanently wipes all uploaded files and temporary Neo4j records."):
-            cleanup_temp_patient(TEMP_PATIENT_ID)
+            execute_cleanup_temp_session(TEMP_PATIENT_ID)
             st.session_state.temp_report_active = False
             st.session_state.temp_report_summary = None
             st.session_state.temp_messages = []
@@ -763,27 +859,25 @@ def render_evidence_expander(evidence_id: str) -> None:
     raw OCR text, report metadata, and confidence badge (SRS FR-9.1.3).
     """
     patient_id = parse_patient_id_from_evidence_id(evidence_id)
-    record: Optional[EvidenceRecord] = None
-    if patient_id:
-        record = get_evidence_by_id(patient_id=patient_id, evidence_id=evidence_id)
+    record = execute_get_evidence_by_id(evidence_id=evidence_id, patient_id=patient_id)
 
     with st.expander(f"Source Evidence: {evidence_id}", expanded=False):
         if record is None:
-            st.warning(f"Evidence record {evidence_id} could not be found in the local evidence store.")
+            st.warning(f"Evidence record {evidence_id} could not be found.")
             return
 
         # Top Metadata Banner
         meta_col1, meta_col2, meta_col3 = st.columns([1.5, 1.5, 1.2])
         with meta_col1:
-            st.markdown(f"**Report Type:** `{record.report_type}`")
+            st.markdown(f"**Report Type:** `{getattr(record, 'report_type', 'Clinical Report')}`")
             st.markdown(f"**Patient:** `{get_display_label(record.patient_id)}` ({record.patient_id})")
         with meta_col2:
-            date_str = record.report_date or "Undated"
+            date_str = getattr(record, "report_date", None) or "Undated"
             st.markdown(f"**Report Date:** `{date_str}`")
-            st.markdown(f"**Page:** `{record.page_number}` (Source: `{record.source_type}`)")
+            st.markdown(f"**Page:** `{record.page_number}` (Source: `{getattr(record, 'source_type', 'document')}`)")
         with meta_col3:
             st.markdown("**Confidence:**")
-            st.markdown(get_confidence_badge_markdown(record.confidence))
+            st.markdown(get_confidence_badge_markdown(getattr(record, "confidence", 1.0)))
 
         st.markdown("---")
 
@@ -792,20 +886,28 @@ def render_evidence_expander(evidence_id: str) -> None:
 
         with tab_raw:
             st.caption("Verbatim extracted text from source document (no paraphrasing):")
-            st.code(record.raw_text, language=None)
+            st.code(getattr(record, "raw_text", getattr(record, "text", "")), language=None)
 
         with tab_image:
-            image_rel_path = record.page_image_path
-            image_abs_path = _ROOT_DIR / image_rel_path if image_rel_path else None
-
-            if image_abs_path and image_abs_path.exists():
+            img_b64 = getattr(record, "image_base64", None)
+            if img_b64:
+                import base64
                 st.image(
-                    str(image_abs_path),
+                    base64.b64decode(img_b64),
                     caption=f"{get_display_label(record.patient_id)} — Report {record.report_id} (Page {record.page_number})",
                     use_container_width=True,
                 )
             else:
-                st.info(f"Page scan image not found on disk at: `{image_rel_path}`")
+                image_rel_path = getattr(record, "page_image_path", None)
+                image_abs_path = _ROOT_DIR / image_rel_path if image_rel_path else None
+                if image_abs_path and image_abs_path.exists():
+                    st.image(
+                        str(image_abs_path),
+                        caption=f"{get_display_label(record.patient_id)} — Report {record.report_id} (Page {record.page_number})",
+                        use_container_width=True,
+                    )
+                else:
+                    st.info(f"Page scan image not found on disk at: `{image_rel_path}`")
 
 
 def render_citations_list(citations: List[str]) -> None:
@@ -846,7 +948,6 @@ def render_message_content(msg: Dict[str, Any]) -> None:
 
             with col1:
                 citations_g = graph_res.get("citations", [])
-                cit_pills_g = "".join(f'<span class="cit-badge" title="Source Evidence">{c}</span>' for c in citations_g) if citations_g else '<span style="color: var(--text-muted); font-size: 0.75rem;">None</span>'
                 answer_g = graph_res.get("answer", "No response generated.")
                 st.markdown(
                     f"""
@@ -861,10 +962,6 @@ def render_message_content(msg: Dict[str, Any]) -> None:
                         <div class="comparison-body">
                             {answer_g}
                         </div>
-                        <div class="comparison-citations-row">
-                            <div style="font-size: 0.68rem; font-weight: 600; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.25rem;">Grounded Citations:</div>
-                            {cit_pills_g}
-                        </div>
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -872,7 +969,6 @@ def render_message_content(msg: Dict[str, Any]) -> None:
 
             with col2:
                 citations_pi = pi_res.get("citations", [])
-                cit_pills_pi = "".join(f'<span class="cit-badge" title="Source Evidence">{c}</span>' for c in citations_pi) if citations_pi else '<span style="color: var(--text-muted); font-size: 0.75rem;">None</span>'
                 answer_pi = pi_res.get("answer", "No response generated.")
                 st.markdown(
                     f"""
@@ -886,10 +982,6 @@ def render_message_content(msg: Dict[str, Any]) -> None:
                         </div>
                         <div class="comparison-body">
                             {answer_pi}
-                        </div>
-                        <div class="comparison-citations-row">
-                            <div style="font-size: 0.68rem; font-weight: 600; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.25rem;">Grounded Citations:</div>
-                            {cit_pills_pi}
                         </div>
                     </div>
                     """,
@@ -911,7 +1003,6 @@ def render_message_content(msg: Dict[str, Any]) -> None:
 
             citations = msg.get("citations", [])
             if citations:
-                st.caption(f"Citations ({len(citations)}): {', '.join(f'`{c}`' for c in citations)}")
                 render_citations_list(citations)
 
 
@@ -941,13 +1032,13 @@ def execute_query(
         try:
             if compare_both:
                 with st.spinner("Analyzing records with both GraphRAG and PageIndex engines..."):
-                    graph_res = answer_question(
+                    graph_res = execute_answer_question(
                         question=question,
                         mode=mode.lower(),
                         selected_patients=selected_patients,
                         backend="graph",
                     )
-                    pi_res = answer_question(
+                    pi_res = execute_answer_question(
                         question=question,
                         mode=mode.lower(),
                         selected_patients=selected_patients,
@@ -968,7 +1059,7 @@ def execute_query(
             else:
                 backend_label = "GraphRAG (Neo4j)" if backend == "graph" else "PageIndex (Tree)"
                 with st.spinner(f"Querying {backend_label} & verifying evidence citations..."):
-                    res = answer_question(
+                    res = execute_answer_question(
                         question=question,
                         mode=mode.lower(),
                         selected_patients=selected_patients,
@@ -1124,7 +1215,7 @@ def render_user_report_tab() -> None:
         with col_clean:
             if st.button("End Session & Purge Report", type="secondary", use_container_width=True, help="Permanently wipes all files and graph records for this report."):
                 with st.spinner("Clearing temporary session data and purging isolated Neo4j database..."):
-                    cleanup_temp_patient(TEMP_PATIENT_ID)
+                    execute_cleanup_temp_session(TEMP_PATIENT_ID)
                     st.session_state.temp_report_active = False
                     st.session_state.temp_report_summary = None
                     st.session_state.temp_messages = []
@@ -1166,13 +1257,13 @@ def render_user_report_tab() -> None:
             with st.chat_message("assistant", avatar=get_chat_avatar("assistant")):
                 with st.spinner("Analyzing your report with GraphRAG (isolated Neo4j) and PageIndex engines..."):
                     try:
-                        graph_res = answer_question(
+                        graph_res = execute_answer_question(
                             question=active_query,
                             mode="individual",
                             selected_patients=[TEMP_PATIENT_ID],
                             backend="graph",
                         )
-                        pi_res = answer_question(
+                        pi_res = execute_answer_question(
                             question=active_query,
                             mode="individual",
                             selected_patients=[TEMP_PATIENT_ID],
@@ -1244,7 +1335,7 @@ def render_user_report_tab() -> None:
             if ingest_btn:
                 status_container = st.status("Initializing report ingestion pipeline...", expanded=True)
                 try:
-                    summary = ingest_user_report(
+                    summary = execute_ingest_user_report(
                         pdf_bytes=uploaded_file.getvalue(),
                         original_filename=uploaded_file.name,
                         patient_id=TEMP_PATIENT_ID,

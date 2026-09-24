@@ -1,0 +1,14 @@
+# Medical Records RAG — Azure Docker Backend Dependencies
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pydantic>=2.7.0
+pypdf>=4.0.0
+pdf2image>=1.17.0
+Pillow>=10.0.0
+neo4j>=5.20.0
+python-dotenv>=1.0.1
+huggingface_hub>=0.20.0
+requests>=2.31.0
+llama-cpp-python>=0.3.0
+pytest>=8.0.0

@@ -35,12 +35,12 @@ from llm_client import chat
 from normalize import canonicalize_lab_name, compute_abnormal_flag
 
 
-# Temporary session Neo4j instance configuration
+# Temporary session Neo4j instance configuration (defaults allow seamless container startup without Azure env config)
 TEMP_NEO4J_CONFIG = {
-    "uri": "neo4j+s://af2857f2.databases.neo4j.io",
-    "username": "af2857f2",
-    "password": "nv-uzGLpiAx2_14ead9Cu1ytUwSW0mZnaTzOvF0AojQ",
-    "database": "af2857f2",
+    "uri": os.getenv("TEMP_NEO4J_URI", "neo4j+s://af2857f2.databases.neo4j.io"),
+    "username": os.getenv("TEMP_NEO4J_USERNAME", "af2857f2"),
+    "password": os.getenv("TEMP_NEO4J_PASSWORD", "nv-uzGLpiAx2_14ead9Cu1ytUwSW0mZnaTzOvF0AojQ"),
+    "database": os.getenv("TEMP_NEO4J_DATABASE", "af2857f2"),
 }
 
 

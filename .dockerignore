@@ -1,0 +1,28 @@
+# Git and version control
+.git
+.gitignore
+
+# Environment files & local secrets (Injected at runtime by Azure)
+.env
+.env.local
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# IDE and editors
+.vscode/
+.idea/
+
+# Streamlit config (Frontend only)
+.streamlit/
+
+# Temporary test logs and caches
+tests/
+scratch/
