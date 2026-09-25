@@ -92,7 +92,7 @@ def send_query(
     mode: str,
     selected_patients: List[str],
     backend: str,
-    timeout: int = 300,
+    timeout: int = 1000,
 ) -> Dict[str, Any]:
     """Calls POST /query to execute RAG inference on Azure backend."""
     base_url = get_backend_url()
