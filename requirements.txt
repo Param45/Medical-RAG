@@ -1,32 +1,5 @@
-# Medical Records RAG Demo — Production Dependencies
-
-# PDF & Image Processing
-pypdf>=4.0.0
-pdf2image>=1.17.0
-Pillow>=10.0.0
-
-# Neo4j Knowledge Graph Driver
-neo4j>=5.20.0
-
-# Environment Configuration
-python-dotenv>=1.0.1
-
-# Streamlit Clinical Workstation UI
+# Medical Records RAG — Streamlit Community Cloud Frontend Dependencies
 streamlit>=1.35.0
-
-# LLM Providers (Cloud & Local)
-google-genai>=0.1.0
-anthropic>=0.30.0
-openai>=1.0.0
-llama-cpp-python>=0.3.0
-
-# Model Downloading & Utilities
-huggingface_hub>=0.20.0
 requests>=2.31.0
-
-# Testing & Quality Assurance
-pytest>=8.0.0
-
-# Optional / Local OCR Engine (MinerU)
-# Model weights can be fetched via `python download_models.py`
-# magic-pdf[full]>=1.0.0
+Pillow>=10.0.0
+python-dotenv>=1.0.1
