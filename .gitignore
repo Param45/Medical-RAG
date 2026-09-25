@@ -36,11 +36,11 @@ Thumbs.db
 .pytest_cache/
 
 # Generated artifacts
+data/raw/
 data/evidence/
 data/pageindex/
 data/reports/
 
 # NOTE: The following are intentionally NOT gitignored:
-# - data/raw/               (source PDFs — trackable for this demo)
 # - data/normalization/     (hand-curated dictionary — should be versioned)
 # - .env.example            (template for configuration)
