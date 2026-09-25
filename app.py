@@ -766,9 +766,15 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
 
     st.sidebar.markdown("---")
 
-    # Backend mode is fixed to dual comparison across both engines
-    backend = "both"
-    compare_both = True
+    # Engine evaluation selection
+    backend_choice = st.sidebar.selectbox(
+        "Retrieval Engine",
+        options=["Dual Comparison (Both Engines)", "GraphRAG (Neo4j)", "PageIndex (Tree Index)"],
+        index=0,
+        help="Choose whether to evaluate both engines side-by-side or run a faster single engine on CPU.",
+    )
+    backend = resolve_backend(backend_choice)
+    compare_both = (backend == "both")
 
     # Clear chat affordance
     if st.sidebar.button("Clear Conversation", use_container_width=True):
@@ -792,7 +798,7 @@ def render_sidebar() -> Tuple[str, List[str], str, bool]:
             <div style="color: #94a3b8; font-size: 0.68rem; text-transform: uppercase; font-weight: 600;">Patient(s)</div>
             <div style="color: #ffffff; font-weight: 600; margin-bottom: 0.4rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{patient_display}">{patient_display}</div>
             <div style="color: #94a3b8; font-size: 0.68rem; text-transform: uppercase; font-weight: 600;">Engine Evaluation</div>
-            <div style="color: #38bdf8; font-weight: 600; margin-bottom: 0.4rem;">Dual Comparison</div>
+            <div style="color: #38bdf8; font-weight: 600; margin-bottom: 0.4rem;">{"Dual Comparison" if compare_both else ("GraphRAG (Neo4j)" if backend == "graph" else "PageIndex (Tree)")}</div>
             <div style="color: #94a3b8; font-size: 0.68rem; text-transform: uppercase; font-weight: 600;">Architecture</div>
             <div style="color: {deployment_color}; font-weight: 600; margin-bottom: 0.4rem;">{deployment_label}</div>
             <div style="color: #94a3b8; font-size: 0.68rem; text-transform: uppercase; font-weight: 600;">Compute</div>
