@@ -378,3 +378,94 @@ class TestTaskRouting:
         assert res == "Inference answer"
         mock_local.assert_called_once()
 
+
+
+class TestCloudRateLimiting:
+    """Free-tier quotas must be respected so a long rebuild is not killed by 429s."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_windows(self, monkeypatch):
+        llm_client._CLOUD_MINUTE_LOG.clear()
+        llm_client._CLOUD_DAY_LOG.clear()
+        monkeypatch.setenv("LLM_CLOUD_RPM", "15")
+        monkeypatch.setenv("LLM_CLOUD_TPM", "250000")
+        monkeypatch.setenv("LLM_CLOUD_RPD", "500")
+        yield
+        llm_client._CLOUD_MINUTE_LOG.clear()
+        llm_client._CLOUD_DAY_LOG.clear()
+
+    def test_requests_within_the_limit_are_not_delayed(self):
+        import time
+        t0 = time.time()
+        for _ in range(15):
+            llm_client.throttle_cloud_call(1000)
+        assert time.time() - t0 < 1.0
+        assert len(llm_client._CLOUD_MINUTE_LOG) == 15
+
+    @staticmethod
+    def _sleep_that_advances_time(sleeps):
+        """Record the wait and age the window by it, so the limiter can make progress."""
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            llm_client._CLOUD_MINUTE_LOG[:] = [
+                (t - seconds, n) for t, n in llm_client._CLOUD_MINUTE_LOG
+            ]
+        return fake_sleep
+
+    def test_request_over_the_minute_limit_waits(self, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr(llm_client.time, "sleep", self._sleep_that_advances_time(sleeps))
+
+        for _ in range(15):
+            llm_client.throttle_cloud_call(1000)
+        assert sleeps == [], "the first 15 requests are within quota"
+
+        llm_client.throttle_cloud_call(1000)
+        assert len(sleeps) == 1, f"16th request should wait exactly once, got {sleeps}"
+        assert 55.0 <= sleeps[0] <= 61.0, f"should wait out the minute window, got {sleeps[0]}"
+
+    def test_token_limit_also_gates(self, monkeypatch):
+        monkeypatch.setenv("LLM_CLOUD_TPM", "1000")
+        sleeps = []
+        monkeypatch.setattr(llm_client.time, "sleep", self._sleep_that_advances_time(sleeps))
+
+        llm_client.throttle_cloud_call(900)
+        assert sleeps == []
+        llm_client.throttle_cloud_call(900)  # 1800 > 1000 TPM
+        assert len(sleeps) == 1, f"second call exceeding TPM should wait, got {sleeps}"
+
+    def test_daily_quota_aborts_instead_of_spinning(self, monkeypatch):
+        monkeypatch.setenv("LLM_CLOUD_RPD", "3")
+        for _ in range(3):
+            llm_client.throttle_cloud_call(10)
+        with pytest.raises(RuntimeError, match="Daily cloud request quota"):
+            llm_client.throttle_cloud_call(10)
+
+    def test_local_calls_are_never_throttled(self, monkeypatch):
+        monkeypatch.setattr(llm_client, "_call_local", lambda **kw: "ok")
+        monkeypatch.setattr(
+            llm_client, "throttle_cloud_call",
+            lambda n: pytest.fail("local call must not be throttled"),
+        )
+        assert llm_client.chat([{"role": "user", "content": "x"}], provider="local") == "ok"
+
+    def test_quota_error_backs_off_longer_than_the_normal_retry(self, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr(llm_client.time, "sleep", lambda s: sleeps.append(s))
+        monkeypatch.setattr(llm_client, "throttle_cloud_call", lambda n: None)
+
+        def boom(**kw):
+            raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded")
+
+        monkeypatch.setattr(llm_client, "_call_gemini", boom)
+        with pytest.raises(RuntimeError):
+            llm_client.chat(
+                [{"role": "user", "content": "x"}],
+                provider="gemini", api_key="k", model="m",
+                max_retries=1, retry_delay_seconds=1.0,
+            )
+        assert max(sleeps) >= 60.0, f"expected a 60s+ quota backoff, got {sleeps}"
+
+    def test_token_estimate_counts_system_and_messages(self):
+        n = llm_client._estimate_tokens([{"role": "user", "content": "a" * 400}], "b" * 400)
+        assert 150 <= n <= 250  # ~800 chars / 4

@@ -13,9 +13,11 @@ Includes a single retry on transient errors.
 """
 
 import os
+import re
+import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
 # Ensure .env is loaded
@@ -257,6 +259,68 @@ def _call_openai(
 
 
 # ==============================================================================
+# CLOUD PROVIDER RATE LIMITING
+#
+# Free-tier Gemini quotas are enforced per minute and per day. A rebuild issues
+# ~110 calls back to back, so without throttling the provider starts returning 429
+# a few seconds in and the build dies partway through, leaving a half-populated
+# graph. Cloud calls therefore pass through a sliding window sized from .env.
+# Local calls are never throttled.
+# ==============================================================================
+_CLOUD_MINUTE_LOG: List[Tuple[float, int]] = []  # (timestamp, estimated tokens)
+_CLOUD_DAY_LOG: List[float] = []
+_CLOUD_LOCK = threading.Lock()
+
+_RATE_LIMIT_ERROR = re.compile(r"429|RESOURCE_EXHAUSTED|quota|rate.?limit", re.IGNORECASE)
+
+
+def _estimate_tokens(messages: List[Dict[str, str]], system: Optional[str]) -> int:
+    """Rough token count for quota accounting (~4 characters per token)."""
+    chars = len(system or "") + sum(len(m.get("content") or "") for m in messages)
+    return max(1, chars // 4)
+
+
+def throttle_cloud_call(est_tokens: int) -> None:
+    """
+    Block until another cloud request fits inside the configured quotas.
+
+    Raises RuntimeError when the daily request quota is spent, so a long build
+    stops with a clear reason instead of retrying against an exhausted key.
+    """
+    rpm = int(os.getenv("LLM_CLOUD_RPM") or 15)
+    tpm = int(os.getenv("LLM_CLOUD_TPM") or 250000)
+    rpd = int(os.getenv("LLM_CLOUD_RPD") or 500)
+
+    while True:
+        with _CLOUD_LOCK:
+            now = time.time()
+            _CLOUD_MINUTE_LOG[:] = [e for e in _CLOUD_MINUTE_LOG if now - e[0] < 60.0]
+            _CLOUD_DAY_LOG[:] = [t for t in _CLOUD_DAY_LOG if now - t < 86400.0]
+
+            if len(_CLOUD_DAY_LOG) >= rpd:
+                raise RuntimeError(
+                    f"Daily cloud request quota reached ({rpd} requests/day). "
+                    "Wait for the quota to reset before rebuilding again."
+                )
+
+            fits_rpm = len(_CLOUD_MINUTE_LOG) < rpm
+            fits_tpm = sum(n for _, n in _CLOUD_MINUTE_LOG) + est_tokens <= tpm
+
+            if fits_rpm and fits_tpm:
+                _CLOUD_MINUTE_LOG.append((now, est_tokens))
+                _CLOUD_DAY_LOG.append(now)
+                return
+
+            # Wait for the oldest call to age out of the 60s window.
+            wait = max(0.5, 60.0 - (now - _CLOUD_MINUTE_LOG[0][0]) + 0.25)
+            reason = "request" if not fits_rpm else "token"
+            used = len(_CLOUD_DAY_LOG)
+
+        print(f"[RATE LIMIT] {reason} quota window full; waiting {wait:.1f}s ({used}/{rpd} today)")
+        time.sleep(wait)
+
+
+# ==============================================================================
 # GLOBAL LLM ROUTING TOGGLE (Code-Level Only)
 #
 # By default, the Local LLM (MedGemma GGUF via llama-cpp-python) is used EVERYWHERE
@@ -405,6 +469,9 @@ def chat(
 
     for attempt in range(1, total_attempts + 1):
         try:
+            if not is_local:
+                throttle_cloud_call(_estimate_tokens(messages, system))
+
             if is_local:
                 return _call_local(model=model, messages=messages, system=system)
             elif provider in ("gemini", "google"):
@@ -420,7 +487,12 @@ def chat(
         except Exception as exc:
             last_error = exc
             if attempt < total_attempts:
-                time.sleep(retry_delay_seconds)
+                delay = retry_delay_seconds
+                if not is_local and _RATE_LIMIT_ERROR.search(str(exc)):
+                    # A quota rejection only clears when the window rolls over.
+                    delay = max(delay, 60.0)
+                    print(f"[RATE LIMIT] provider refused on quota; backing off {delay:.0f}s")
+                time.sleep(delay)
             else:
                 raise RuntimeError(
                     f"LLM call to provider '{provider}' (model: '{model}') failed after {attempt} attempt(s): {exc}"

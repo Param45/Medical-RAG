@@ -286,11 +286,17 @@ def extract_triples(
         f"Extract all clinical triples matching the schema. Return ONLY valid JSON list of triples."
     )
 
+    # Permanent patients are extracted with the cloud model; the ephemeral upload
+    # sandbox stays on the local model so an uploaded report never leaves the host.
+    from patients import is_temp_patient
+    use_cloud = not is_temp_patient(patient_id)
+
     try:
         response_text = chat(
             messages=[{"role": "user", "content": prompt}],
             system=EXTRACTION_SYSTEM_PROMPT,
             task="build",
+            use_external=use_cloud,
         )
         if not response_text or not response_text.strip():
             return []

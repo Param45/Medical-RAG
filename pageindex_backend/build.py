@@ -33,6 +33,17 @@ from llm_client import chat
 from patients import all_patient_ids, get_display_label
 
 
+def _use_cloud_for(patient_id: Optional[str]) -> bool:
+    """
+    Permanent patients summarise on the cloud model; the ephemeral upload sandbox
+    stays on the local model so an uploaded report never leaves the host.
+    """
+    if not patient_id:
+        return True
+    from patients import is_temp_patient
+    return not is_temp_patient(patient_id)
+
+
 def get_default_reports_dir() -> Path:
     """Get default path to data/reports/ directory."""
     return _ROOT_DIR / "data" / "reports"
@@ -48,6 +59,7 @@ def generate_report_summary(
     report_type: str,
     report_date: Optional[str],
     text: str,
+    patient_id: Optional[str] = None,
 ) -> str:
     """
     Generate a 2-4 sentence clinical summary for a single report (SRS FR-7.1.2).
@@ -86,6 +98,7 @@ def generate_report_summary(
             messages=[{"role": "user", "content": user_prompt}],
             system=system_prompt,
             task="build",
+            use_external=_use_cloud_for(patient_id),
             max_retries=2,
             retry_delay_seconds=4.0,
         ).strip()
@@ -141,6 +154,7 @@ def generate_root_summary(
             messages=[{"role": "user", "content": user_prompt}],
             system=system_prompt,
             task="build",
+            use_external=_use_cloud_for(patient_id),
             max_retries=2,
             retry_delay_seconds=4.0,
         ).strip()
@@ -452,6 +466,7 @@ def build_tree_for_patient(
             report_type=report_type,
             report_date=report_date,
             text=concat_report_text,
+            patient_id=patient_id,
         )
 
         report_node = {
