@@ -190,3 +190,50 @@ class TestStructuredFactsAreNotFabricated:
             },
         )
         assert "not enough data points" in facts[0]["text"]
+
+
+class TestCanonicalNamesAreNotCollapsed:
+    """
+    The junk repair in resolve_lab_test_name must never merge distinct analytes.
+
+    'Mean Corpuscular Hemoglobin' (pg) and 'Mean Corpuscular Hemoglobin
+    Concentration' (g/dL) both contain the token 'Hemoglobin'. Collapsing them into
+    it produced one series of 11.5 gm/dl, 24.2 pg and 30.3 g/dL presented as a
+    patient's haemoglobin, and an answer calling the trend "improving" when the only
+    real haemoglobin value was flagged low.
+    """
+
+    @pytest.mark.parametrize("name", [
+        "Hemoglobin",
+        "Mean Corpuscular Hemoglobin",
+        "Mean Corpuscular Hemoglobin Concentration",
+        "Mean Corpuscular Volume",
+        "Glycated Hemoglobin (HbA1c)",
+        "Packed Cell Volume",
+        "Platelet Count",
+        "Serum Creatinine",
+        "White Blood Cell Count",
+        "Absolute Neutrophil Count",
+        "Total Leukocyte Count",
+    ])
+    def test_a_canonical_name_is_returned_unchanged(self, name):
+        assert resolve_lab_test_name(name) == name
+
+    def test_the_three_hemoglobin_analytes_stay_distinct(self):
+        names = {
+            resolve_lab_test_name(n)
+            for n in (
+                "Hemoglobin",
+                "Mean Corpuscular Hemoglobin",
+                "Mean Corpuscular Hemoglobin Concentration",
+            )
+        }
+        assert len(names) == 3, f"distinct tests were merged: {names}"
+
+    def test_junk_repair_still_works(self):
+        assert resolve_lab_test_name("hemoglobin_11.5") == "Hemoglobin"
+        assert resolve_lab_test_name("Hb") == "Hemoglobin"
+        assert resolve_lab_test_name("mean corp hemoglobin (mch) result: 24.2 pg") == (
+            "Mean Corpuscular Hemoglobin"
+        )
+        assert resolve_lab_test_name("1.10") is None

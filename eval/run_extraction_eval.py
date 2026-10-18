@@ -185,7 +185,12 @@ def evaluate(gold_path: Path, n_chunks: int, chunks_path: Path) -> Dict[str, Any
             "negated": negated,
             "unsupported": unsupported,
             "spurious_but_in_text": spurious,
-            "json_parsed": bool(preds) or error is None,
+            # A reply that yielded nothing is NOT evidence of valid JSON. Qwen-3B
+            # returned zero facts on all 8 chunks and the old definition scored it
+            # json_valid=1.0, which read as "perfectly well-formed" when it was
+            # "silent". Validity is only claimed when something parsed.
+            "json_parsed": bool(preds),
+            "empty_reply": not preds and error is None,
             "error": error,
             "seconds": round(seconds, 1),
             "missed": [
@@ -209,6 +214,7 @@ def evaluate(gold_path: Path, n_chunks: int, chunks_path: Path) -> Dict[str, Any
     negated_total = sum(len(r["negated"]) for r in rows)
     unsupported_total = sum(len(r["unsupported"]) for r in rows)
     parsed = sum(1 for r in rows if r["json_parsed"])
+    empty = sum(1 for r in rows if r.get("empty_reply"))
     elapsed = time.time() - t_start
 
     def ratio(a: int, b: int) -> float | None:
@@ -250,6 +256,7 @@ def evaluate(gold_path: Path, n_chunks: int, chunks_path: Path) -> Dict[str, Any
         "unsupported_facts": unsupported_total,
         "unsupported_rate": ratio(unsupported_total, pred_total),
         "json_valid_rate": ratio(parsed, len(rows)),
+        "empty_replies": empty,
         "seconds_total": round(elapsed, 1),
         "seconds_per_chunk": round(elapsed / len(rows), 1) if rows else None,
         "rows": rows,

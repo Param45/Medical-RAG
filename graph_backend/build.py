@@ -227,6 +227,77 @@ VALID_RELATION_TYPES = {
 # so a constrained model cannot emit an off-schema relation or label at all —
 # object_name is required and non-empty, which also rules out the placeholder
 # triples the local model used to pad its reply with until it was truncated.
+# Decomposed extraction. Measured failure: asked for everything at once, the local
+# model enumerates one or two items from a list and stops — Qwen-7B returned 1 fact
+# from a chemo record containing 7, MedGemma missed 4 of 5 premedications and 3 of 5
+# biomarkers. "List every drug given, including premedications" is a tractable
+# instruction where "extract all clinical triples" is not. One narrow pass per
+# category, each with its relation enum restricted so the model cannot drift.
+EXTRACTION_PASSES: List[Dict[str, Any]] = [
+    {
+        "name": "diagnoses",
+        "relations": ["STATES_DIAGNOSIS"],
+        "labels": ["Report", "Diagnosis"],
+        "ask": (
+            "EVERY condition, disease or finding this report states the patient HAS. "
+            "Skip anything the text negates or calls inconclusive."
+        ),
+    },
+    {
+        "name": "procedures",
+        "relations": ["UNDERWENT", "SUGGESTS_TEST"],
+        "labels": ["Patient", "Report", "Procedure", "LabTest"],
+        "ask": (
+            "EVERY procedure, scan, biopsy or operation the patient underwent "
+            "(relation UNDERWENT), and EVERY test advised or planned but not yet done "
+            "(relation SUGGESTS_TEST)."
+        ),
+    },
+    {
+        "name": "medications",
+        "relations": ["ADMINISTERED", "CONTAINS"],
+        "labels": ["Report", "Regimen", "Medication"],
+        "ask": (
+            "EVERY drug administered or prescribed, INCLUDING premedications and "
+            "supportive drugs such as antiemetics and steroids, plus the regimen or "
+            "protocol name if one is written. List each drug as its own triple."
+        ),
+    },
+    {
+        "name": "labs",
+        "relations": ["HAS_RESULT"],
+        "labels": ["Report", "LabResult", "LabTest"],
+        "ask": (
+            "EVERY laboratory test result. object_name is the TEST NAME; put the "
+            "number in properties.value. Where a line pairs two tests with two values "
+            "(\"Blood Urea/Creatinine 26/1.1\"), emit one triple per test. Skip any "
+            "figure whose test name you cannot identify."
+        ),
+    },
+    {
+        "name": "staging_biomarkers",
+        "relations": ["HAS_STAGING", "HAS_BIOMARKER"],
+        "labels": ["Report", "Staging", "Biomarker"],
+        "ask": (
+            "EVERY biomarker or receptor reported, each as its own triple, with its "
+            "polarity in properties.value (positive/negative) exactly as written. "
+            "Include a TNM stage ONLY if the text spells one out; never infer one."
+        ),
+    },
+]
+
+
+def build_pass_schema(pass_spec: Dict[str, Any], max_triples: int) -> Dict[str, Any]:
+    """Extraction schema narrowed to one category's relations and labels."""
+    schema = json.loads(json.dumps(EXTRACTION_JSON_SCHEMA))
+    item = schema["properties"]["triples"]["items"]
+    item["properties"]["relation"]["enum"] = sorted(pass_spec["relations"])
+    item["properties"]["subject_label"]["enum"] = sorted(pass_spec["labels"])
+    item["properties"]["object_label"]["enum"] = sorted(pass_spec["labels"])
+    schema["properties"]["triples"]["maxItems"] = max(1, int(max_triples))
+    return schema
+
+
 def build_extraction_schema(max_triples: int) -> Dict[str, Any]:
     """Extraction schema with the array bounded to `max_triples` items."""
     schema = json.loads(json.dumps(EXTRACTION_JSON_SCHEMA))
@@ -234,7 +305,7 @@ def build_extraction_schema(max_triples: int) -> Dict[str, Any]:
     return schema
 
 
-def triple_budget_for(ocr_confidence: Optional[float], text_length: int) -> int:
+def triple_budget_for(ocr_confidence: Optional[float], text_length: int = 0) -> int:
     """
     How many facts a chunk is allowed to yield.
 
@@ -258,10 +329,10 @@ def triple_budget_for(ocr_confidence: Optional[float], text_length: int) -> int:
     else:
         budget = max(1, int(ceiling * 0.25))
 
-    # A 126-character fragment cannot document eight facts whatever its OCR score.
-    # ~100 chars per fact: the densest clean chunk in the gold set carries 7 facts in
-    # 797 characters, so a tighter divisor would cost real recall on dense reports.
-    budget = min(budget, max(1, text_length // 100))
+    # No length-based cap. Text length is a bad proxy for fact density: a flowsheet
+    # line like "Hb 11.0, WBC 10200, Plt 522000" is 30 characters and carries three
+    # facts, so any per-character divisor that constrains noise also truncates dense
+    # clean text. OCR confidence is the signal that actually distinguishes the two.
     return budget
 
 
@@ -298,6 +369,16 @@ EXTRACTION_JSON_SCHEMA = {
 }
 
 
+# This prompt text is measured. eval/results/FINAL_shipping_config.json was produced
+# by SHA f6dfcb406d35 of this string; changing it invalidates that comparison, so run
+# eval/run_extraction_eval.py again after any edit here.
+#
+# Tried and reverted: scoping rule 5b to diagnoses only, so that a procedure performed
+# or a test advised in an inconclusive report would still be extracted. It read as an
+# obvious improvement and measured as a clear loss — recall 0.423 -> 0.231, F1
+# 0.400 -> 0.250 — for one negation error removed, and it did not recover the chunk it
+# was written for. Prompt edits here have non-local effects: that one also changed the
+# output of two chunks it had nothing to do with.
 EXTRACTION_SYSTEM_PROMPT = """You are an expert clinical knowledge graph extraction assistant for general and specialized medical records.
 Your task is to extract structured medical entities and relationships from clinical report text into a strict knowledge graph schema.
 
@@ -398,6 +479,80 @@ Correct reply:
 """
 
 
+def _extraction_system_prompt() -> str:
+    """System prompt for extraction, with the worked example optionally removed."""
+    prompt = EXTRACTION_SYSTEM_PROMPT
+    if os.getenv("EXTRACTION_FEW_SHOT", "false").strip().lower() not in ("1", "true", "yes"):
+        # Measured: the worked example cost recall rather than helping it
+        # (Qwen-7B recall 0.308 -> 0.423 with it removed). A short example anchors
+        # the model to a short answer. Off by default; the switch keeps it measurable.
+        prompt = prompt.split("WORKED EXAMPLE")[0].rstrip()
+    return prompt
+
+
+def _unwrap_triples(items: List[Any]) -> List[Dict[str, Any]]:
+    """
+    Accept either shape a model replies with: the {"triples": [...]} object that
+    constrained decoding produces, or a bare array from an unconstrained reply.
+    """
+    if len(items) == 1 and isinstance(items[0], dict) and "triples" in items[0]:
+        inner = items[0].get("triples")
+        return [t for t in inner if isinstance(t, dict)] if isinstance(inner, list) else []
+    return [t for t in items if isinstance(t, dict)]
+
+
+def _validate_triples(
+    candidates: List[Dict[str, Any]],
+    report_id: str,
+    budget: int,
+) -> List[Dict[str, Any]]:
+    """
+    Drop off-schema, empty and duplicate triples, then apply the evidence budget.
+    Shared by the single-pass and decomposed paths so both enforce one contract.
+    """
+    valid_triples: List[Dict[str, Any]] = []
+    seen = set()
+
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        relation = item.get("relation", "")
+        subject_label = item.get("subject_label", "")
+        object_label = item.get("object_label", "")
+        object_name = str(item.get("object_name") or "").strip()
+
+        # Placeholder triples for relations the model did not find carry no fact.
+        if not object_name and not item.get("properties"):
+            continue
+
+        if relation not in VALID_RELATION_TYPES:
+            print(f"  [SCHEMA] Rejected off-schema relation {relation!r} in {report_id}")
+            continue
+        if subject_label and subject_label not in VALID_NODE_LABELS:
+            print(f"  [SCHEMA] Rejected off-schema subject label {subject_label!r} in {report_id}")
+            continue
+        if object_label and object_label not in VALID_NODE_LABELS:
+            print(f"  [SCHEMA] Rejected off-schema object label {object_label!r} in {report_id}")
+            continue
+
+        # The local model repeats itself: one chunk yielded "Blood" four times.
+        key = (relation.upper(), object_name.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        valid_triples.append(item)
+
+    if len(valid_triples) > budget:
+        print(
+            f"  [BUDGET] {report_id}: {len(valid_triples)} facts exceed the evidence "
+            f"budget of {budget}; keeping the first {budget}."
+        )
+        valid_triples = valid_triples[:budget]
+
+    return valid_triples
+
+
 def extract_triples(
     chunk_text: str,
     normalized_entities: List[Dict[str, Any]],
@@ -422,17 +577,22 @@ def extract_triples(
         )
     norm_context_str = "\n".join(norm_summary) if norm_summary else "(None)"
 
-    prompt = (
-        f"REPORT METADATA:\n"
-        f"- Patient ID: {patient_id}\n"
-        f"- Report ID: {report_id}\n"
-        f"- Report Type: {report_type}\n"
-        f"- Report Date: {report_date}\n\n"
-        f"PRE-NORMALIZED ENTITIES IN CHUNK:\n"
-        f"{norm_context_str}\n\n"
-        f"RAW CHUNK TEXT:\n"
-        f"\"\"\"\n{chunk_text[:3500]}\n\"\"\"\n\n"
-        f"Extract all clinical triples matching the schema. Return ONLY valid JSON list of triples."
+    def _prompt_for(task_line: str) -> str:
+        return (
+            f"REPORT METADATA:\n"
+            f"- Patient ID: {patient_id}\n"
+            f"- Report ID: {report_id}\n"
+            f"- Report Type: {report_type}\n"
+            f"- Report Date: {report_date}\n\n"
+            f"PRE-NORMALIZED ENTITIES IN CHUNK:\n"
+            f"{norm_context_str}\n\n"
+            f"RAW CHUNK TEXT:\n"
+            f"\"\"\"\n{chunk_text[:3500]}\n\"\"\"\n\n"
+            f"{task_line}"
+        )
+
+    prompt = _prompt_for(
+        "Extract all clinical triples matching the schema. Return ONLY valid JSON list of triples."
     )
 
     # Permanent patients are extracted with the cloud model; the ephemeral upload
@@ -440,15 +600,55 @@ def extract_triples(
     from patients import is_temp_patient
     use_cloud = not is_temp_patient(patient_id)
 
-    try:
-        system_prompt = EXTRACTION_SYSTEM_PROMPT
-        if os.getenv("EXTRACTION_FEW_SHOT", "true").strip().lower() not in ("1", "true", "yes"):
-            # Ablation switch for the eval harness: drop the worked example only.
-            system_prompt = system_prompt.split("WORKED EXAMPLE")[0].rstrip()
+    # One narrow pass per category. MEASURED WORSE, so off by default; kept because
+    # the result is counter-intuitive enough to be worth re-testing on another model.
+    #
+    #                    single-pass F1   decomposed F1   unsupported facts
+    #   Qwen2.5-7B           0.400           0.339           2 -> 8
+    #   MedGemma-4B          0.364           0.194           5 -> 18
+    #
+    # Asking "extract EVERY drug" per category pressures the model to produce
+    # something in each category whether or not the chunk contains one. The
+    # clearest sign: a 126-character fragment of pure OCR noise, which the
+    # single-pass run correctly left empty, yielded 3 invented facts per-category.
+    # Abstention is a capability that per-category prompting destroys.
+    decompose = (
+        not use_cloud
+        and os.getenv("EXTRACTION_DECOMPOSE", "false").strip().lower() in ("1", "true", "yes")
+    )
+    if decompose:
+        collected: List[Dict[str, Any]] = []
+        for spec in EXTRACTION_PASSES:
+            pass_budget = max(1, min(budget, 6))
+            try:
+                reply = chat(
+                    messages=[{"role": "user", "content": _prompt_for(
+                        f"Extract ONLY the following, and nothing else:\n{spec['ask']}\n"
+                        f"Allowed relations: {', '.join(spec['relations'])}.\n"
+                        f"If the chunk contains none, return {{\"triples\": []}}."
+                    )}],
+                    system=_extraction_system_prompt(),
+                    task="build",
+                    use_external=False,
+                    json_schema=build_pass_schema(spec, pass_budget),
+                )
+            except Exception as exc:
+                print(f"  [WARN] {spec['name']} pass failed for {report_id}: {exc}")
+                continue
 
+            kept = _unwrap_triples(parse_json_list(reply))
+            print(f"  [{spec['name']}] {len(kept)} candidate(s) for {report_id}")
+            collected.extend(kept)
+
+        if collected:
+            return _validate_triples(collected, report_id, budget)
+        print(f"  [WARN] No parseable triples in any pass for {report_id}")
+        return []
+
+    try:
         response_text = chat(
             messages=[{"role": "user", "content": prompt}],
-            system=system_prompt,
+            system=_extraction_system_prompt(),
             task="build",
             use_external=use_cloud,
             json_schema=build_extraction_schema(budget),
@@ -456,47 +656,18 @@ def extract_triples(
         if not response_text or not response_text.strip():
             return []
 
-        parsed = parse_json_list(response_text)
-        # Constrained decoding returns {"triples": [...]}; unconstrained replies are
-        # usually a bare array. Accept either.
-        if len(parsed) == 1 and isinstance(parsed[0], dict) and "triples" in parsed[0]:
-            inner = parsed[0].get("triples")
-            parsed = inner if isinstance(inner, list) else []
+        parsed = _unwrap_triples(parse_json_list(response_text))
+
+        # Not retried on an empty reply. A grammar does make {"triples": []} a valid
+        # complete answer, and one clean chunk does come back empty — but an
+        # unconstrained retry was measured and recovered nothing on it (identical
+        # recall 0.423 / F1 0.400, one extra model call per empty chunk). The cause is
+        # upstream: the model suppressing a whole chunk, not the grammar.
         if not parsed:
             print(f"  [WARN] No parseable triples in reply for {report_id}")
             return []
 
-        # Schema validation: reject any triple with off-schema labels/relations
-        valid_triples = []
-        for item in parsed:
-            if not isinstance(item, dict):
-                continue
-            relation = item.get("relation", "")
-            subject_label = item.get("subject_label", "")
-            object_label = item.get("object_label", "")
-
-            # The local model emits a placeholder triple for every relation it did
-            # not find, with object_name null. They carry no fact and, unfiltered,
-            # bloat the reply until it is truncated mid-object.
-            if not str(item.get("object_name") or "").strip() and not item.get("properties"):
-                continue
-
-            # Reject off-schema relations
-            if relation not in VALID_RELATION_TYPES:
-                print(f"  [SCHEMA] Rejected off-schema relation '{relation}' in {report_id}")
-                continue
-
-            # Reject off-schema node labels (warn but don't crash)
-            if subject_label and subject_label not in VALID_NODE_LABELS:
-                print(f"  [SCHEMA] Rejected off-schema subject label '{subject_label}' in {report_id}")
-                continue
-            if object_label and object_label not in VALID_NODE_LABELS:
-                print(f"  [SCHEMA] Rejected off-schema object label '{object_label}' in {report_id}")
-                continue
-
-            valid_triples.append(item)
-
-        return valid_triples
+        return _validate_triples(parsed, report_id, budget)
 
     except Exception as exc:
         print(f"  [WARN] Triple extraction failed for {report_id}: {exc}")

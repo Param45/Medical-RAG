@@ -257,6 +257,26 @@ _NOT_A_TEST_NAME = re.compile(
 )
 
 
+_LAB_CANONICAL_NAMES: Optional[Dict[str, str]] = None
+
+
+def _lab_canonical_names(dict_dir: Optional[Path] = None) -> Dict[str, str]:
+    """Normalised canonical lab/biomarker name -> canonical name, for identity checks."""
+    global _LAB_CANONICAL_NAMES
+    if _LAB_CANONICAL_NAMES is not None and dict_dir is None:
+        return _LAB_CANONICAL_NAMES
+
+    medical_dict, _ = load_normalization_dictionaries(dict_dir)
+    names = {
+        re.sub(r"[^a-z0-9]+", " ", v["canonical"].lower()).strip(): v["canonical"]
+        for v in medical_dict.values()
+        if (v.get("type") or "") in ("LabTest", "Biomarker") and v.get("canonical")
+    }
+    if dict_dir is None:
+        _LAB_CANONICAL_NAMES = names
+    return names
+
+
 def _lab_name_patterns(dict_dir: Optional[Path] = None) -> List[Tuple[Any, str]]:
     """Build (whole-token regex, canonical) pairs for every LabTest/Biomarker dictionary key."""
     global _LAB_NAME_PATTERNS
@@ -307,17 +327,31 @@ def resolve_lab_test_name(
     # Underscore-joined labels ('TOTAL_LEUCOCYTE_COUNT') must match space-separated keys.
     raw = re.sub(r"_+", " ", raw).strip() if re.search(r"[A-Za-z]_[A-Za-z]", raw) else raw
 
-    # 1. Exact dictionary hit.
+    # 1. Already a canonical test name: return it untouched.
+    #
+    # This check must come first. The substring repair below exists for junk like
+    # 'hemoglobin_11.5', but applied to a name that is already correct it collapses
+    # distinct analytes into broader ones: 'Mean Corpuscular Hemoglobin' (pg) and
+    # 'Mean Corpuscular Hemoglobin Concentration' (g/dL) both contain the token
+    # 'Hemoglobin' and were being merged into it. That produced a single series of
+    # 11.5 gm/dl, 24.2 pg and 30.3 g/dl reported as one patient's haemoglobin, and an
+    # answer stating the trend was "improving" when the one real value was low.
+    canonical_names = _lab_canonical_names(dict_dir)
+    normalised = re.sub(r"[^a-z0-9]+", " ", raw.lower()).strip()
+    if normalised in canonical_names:
+        return canonical_names[normalised]
+
+    # 2. Exact dictionary key hit (abbreviations: 'Hb' -> 'Hemoglobin').
     exact = canonicalize_lab_name(raw, dict_dir=dict_dir)
     if exact and exact.upper() != raw.upper():
         return exact
 
-    # 2. Longest dictionary term contained in the label.
+    # 3. Longest dictionary term contained in the label (junk repair).
     for pattern, canonical in _lab_name_patterns(dict_dir):
         if pattern.search(raw):
             return canonical
 
-    # 3. Strip a trailing value tail ('Neutrophils Result: 70 %' -> 'Neutrophils').
+    # 4. Strip a trailing value tail ('Neutrophils Result: 70 %' -> 'Neutrophils').
     trimmed = re.split(r"\b(?:result|value|level)s?\b\s*[:=-]?", raw, maxsplit=1, flags=re.IGNORECASE)[0]
     trimmed = re.sub(r"[_\s:=-]+[\d.,]+.*$", "", trimmed).strip(" _:=-")
 
