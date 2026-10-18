@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 from dotenv import load_dotenv
 
 # Ensure project root is in sys.path
@@ -29,7 +29,36 @@ load_dotenv()
 
 from graph_backend.build import get_driver, get_driver_for_patient
 from llm_client import chat
-from normalize import canonicalize_lab_name
+from normalize import resolve_lab_test_name
+
+
+def _resolve_lab_rows(
+    records,
+    test_name: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Repair LabTest names coming out of the graph and filter them in Python.
+
+    Extraction wrote values, units and row ids as LabTest nodes
+    ('1.10 mg/dL', 'LabResult_001', 'Hemoglobin_11.5'), so a Cypher-side
+    `CONTAINS` filter both misses real matches and lets noise through. Resolving
+    here means an already-built graph is cleaned on read, without a rebuild.
+    """
+    want = resolve_lab_test_name(test_name) if test_name else None
+    want = (want or test_name or "").strip().lower() or None
+
+    rows: List[Dict[str, Any]] = []
+    for rec in records:
+        d = dict(rec)
+        resolved = resolve_lab_test_name(d.get("test_name") or "")
+        if not resolved:
+            continue
+        low = resolved.lower()
+        if want and want not in low and low not in want:
+            continue
+        d["test_name"] = resolved
+        rows.append(d)
+    return rows
 
 
 def get_lab_trend(
@@ -47,7 +76,6 @@ def get_lab_trend(
 
     query = """
     MATCH (p:Patient {patient_id: $patient_id})-[:HAS_REPORT]->(r:Report)-[rel1:HAS_RESULT]->(lr:LabResult)-[rel2:OF_TEST]->(lt:LabTest)
-    WHERE $test_name IS NULL OR toLower(lt.canonical_name) CONTAINS toLower($test_name)
     RETURN lt.canonical_name AS test_name,
            lr.value AS value,
            lr.unit AS unit,
@@ -60,7 +88,7 @@ def get_lab_trend(
     results: List[Dict[str, Any]] = []
     try:
         with driver.session() as session:
-            records = session.run(query, patient_id=patient_id, test_name=test_name)
+            records = _resolve_lab_rows(session.run(query, patient_id=patient_id), test_name)
             for rec in records:
                 t_name = rec.get("test_name", "")
                 val = rec.get("value", "")
@@ -505,7 +533,6 @@ def get_improvement_trend(
             # Get all lab results ordered by date, optionally filtered by test
             query = """
             MATCH (p:Patient {patient_id: $patient_id})-[:HAS_REPORT]->(r:Report)-[rel1:HAS_RESULT]->(lr:LabResult)-[rel2:OF_TEST]->(lt:LabTest)
-            WHERE $test_name IS NULL OR toLower(lt.canonical_name) CONTAINS toLower($test_name)
             RETURN lt.canonical_name AS test_name,
                    lr.value AS value,
                    lr.unit AS unit,
@@ -515,8 +542,8 @@ def get_improvement_trend(
                    rel1.confidence AS confidence
             ORDER BY lt.canonical_name, date ASC
             """
-            records = session.run(query, patient_id=patient_id, test_name=test_name)
-            all_results = [dict(rec) for rec in records]
+            all_results = _resolve_lab_rows(session.run(query, patient_id=patient_id), test_name)
+            all_results.sort(key=lambda r: (str(r.get("test_name") or ""), str(r.get("date") or "")))
 
             if not all_results:
                 results.append({
@@ -599,15 +626,11 @@ def get_specific_lab_value(
         driver = get_driver_for_patient(patient_id)
         should_close_driver = True
 
-    # Canonicalize the test name to match graph nodes
-    canonical_test = canonicalize_lab_name(test_name) if test_name else test_name
-
     results: List[Dict[str, Any]] = []
     try:
         with driver.session() as session:
             query = """
             MATCH (p:Patient {patient_id: $patient_id})-[:HAS_REPORT]->(r:Report)-[rel1:HAS_RESULT]->(lr:LabResult)-[rel2:OF_TEST]->(lt:LabTest)
-            WHERE toLower(lt.canonical_name) CONTAINS toLower($test_name)
             RETURN lt.canonical_name AS test_name,
                    lr.value AS value,
                    lr.unit AS unit,
@@ -617,8 +640,8 @@ def get_specific_lab_value(
                    rel1.confidence AS confidence
             ORDER BY date ASC
             """
-            records = session.run(query, patient_id=patient_id, test_name=canonical_test or "")
-            all_results = [dict(rec) for rec in records]
+            all_results = _resolve_lab_rows(session.run(query, patient_id=patient_id), test_name)
+            all_results.sort(key=lambda r: str(r.get("date") or ""))
 
             # Filter by target date/period if provided
             if target_date and all_results:
@@ -650,8 +673,13 @@ def get_specific_lab_value(
 
 
 def classify_intent(question: str) -> str:
+    """Primary intent for `question` (first match of `classify_intents`)."""
+    return classify_intents(question)[0]
+
+
+def classify_intents(question: str) -> List[str]:
     """
-    Classifies question intent into one of:
+    Classifies question intent into one or more of:
     - "chemo_cycle_status"
     - "suggested_vs_performed"
     - "improvement_trend"
@@ -663,30 +691,35 @@ def classify_intent(question: str) -> str:
     - "open_ended"
     """
     q_lower = question.lower()
+    matched: List[str] = []
+
+    # A compound question ("my diagnosis and treatment history") carries several
+    # intents; returning only the first silently drops half the answer, so collect
+    # every match and let the caller union the retrieved facts.
 
     # --- New deterministic intents (checked FIRST, before general ones) ---
 
     # Chemo / treatment cycle status: "how many cycles", "remaining cycles", "completed chemo", "dialysis sessions"
     if (any(k in q_lower for k in ["chemo", "chemotherapy", "cycle", "cycles", "round", "rounds", "session", "sessions", "fraction", "fractions"]) and
         any(k in q_lower for k in ["remain", "remaining", "left", "complete", "completed", "many", "count", "next", "status", "scheduled"])):
-        return "chemo_cycle_status"
+        matched.append("chemo_cycle_status")
 
     # Suggested vs performed tests: "suggested tests", "pending tests"
     if (("suggested" in q_lower or "advised" in q_lower or "ordered" in q_lower) and
         ("test" in q_lower or "perform" in q_lower or "done" in q_lower or "pending" in q_lower)):
-        return "suggested_vs_performed"
+        matched.append("suggested_vs_performed")
 
     # Improvement trend: "am I improving", "getting better", "improvements in my health"
     if any(k in q_lower for k in ["improving", "improvement", "better", "worse", "progress"]):
         if any(k in q_lower for k in ["health", "condition", "status", "test", "lab", "hemoglobin", "sugar", "creatinine"]):
-            return "improvement_trend"
+            matched.append("improvement_trend")
 
     # Specific lab value at a time: "sugar level", "hemoglobin on", "creatinine in"
     if "trend" not in q_lower and any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
         "sugar", "glucose", "creatinine", "hemoglobin", "platelet", "bilirubin", "blood sugar"
     ]):
         if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in ["level", "reading", "value", "status"]) or re.search(r"\b(?:on|in|at)\s+\d", q_lower):
-            return "specific_lab_value"
+            matched.append("specific_lab_value")
 
     # --- Original intents ---
 
@@ -696,7 +729,7 @@ def classify_intent(question: str) -> str:
         "illness", "what cancer", "type of cancer", "pathology finding", "heart disease", "diabetes",
         "hypertension", "infection", "kidney disease", "liver disease"
     ]):
-        return "diagnosis_list"
+        matched.append("diagnosis_list")
 
     # Staging & Biomarkers patterns
     if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
@@ -704,7 +737,7 @@ def classify_intent(question: str) -> str:
         "progesterone", "ki67", "ki-67", "staging", "stage", "tnm", "grade", "nottingham",
         "receptor status", "receptors", "lvef", "ejection fraction", "hba1c", "a1c", "gcs", "nyha", "ckd stage"
     ]):
-        return "staging_biomarker"
+        matched.append("staging_biomarker")
 
     # Lab trends patterns (word boundaries prevent 'anc' from matching 'cancer')
     if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
@@ -713,7 +746,7 @@ def classify_intent(question: str) -> str:
         "trend", "trends", "wbc", "anc", "tlc", "calcium", "phosphate", "urea", "bun",
         "troponin", "bnp", "sodium", "potassium", "chloride", "cholesterol", "lipid", "vitals", "blood pressure", "pulse", "spo2"
     ]):
-        return "lab_trend"
+        matched.append("lab_trend")
 
     # Medication / Treatment / Regimen / Procedure patterns
     if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
@@ -725,7 +758,10 @@ def classify_intent(question: str) -> str:
         "antibiotic", "ceftriaxone", "azithromycin", "meropenem", "paracetamol", "angioplasty",
         "stent", "bypass", "cabg", "dialysis", "endoscopy", "colonoscopy", "intubation"
     ]):
-        return "medication_history"
+        matched.append("medication_history")
+
+    if matched:
+        return matched
 
     # LLM classification fallback for ambiguous questions
     prompt = (
@@ -751,11 +787,41 @@ def classify_intent(question: str) -> str:
         }
         for valid in valid_intents:
             if valid in resp:
-                return valid
+                return [valid]
     except Exception:
         pass
 
-    return "open_ended"
+    return ["open_ended"]
+
+
+# Clauses that mutate or leak: the open-ended path runs model-authored Cypher, so a
+# hallucinated write would destroy records and a dropped WHERE would cross patients.
+_CYPHER_WRITE_CLAUSES = re.compile(
+    r"\b(?:CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|LOAD\s+CSV|CALL\s*\{|apoc\.)",
+    re.IGNORECASE,
+)
+
+
+def assert_read_only_patient_scoped(cypher_query: str) -> str:
+    """
+    Validate model-generated Cypher before execution.
+
+    Raises ValueError unless the statement is a single read-only query that is
+    still scoped by the $patient_ids parameter.
+    """
+    q = (cypher_query or "").strip().rstrip(";")
+    if not q:
+        raise ValueError("empty Cypher query")
+    if ";" in q:
+        raise ValueError("multiple statements are not allowed")
+
+    match = _CYPHER_WRITE_CLAUSES.search(q)
+    if match:
+        raise ValueError(f"write/procedure clause '{match.group(0).strip()}' is not allowed")
+    if "$patient_ids" not in q:
+        raise ValueError("query is not scoped by $patient_ids")
+
+    return q
 
 
 def open_ended_query(
@@ -816,7 +882,7 @@ def open_ended_query(
     try:
         resp = chat([{"role": "user", "content": prompt}], task="inference").strip()
         cypher_query = re.sub(r"^```(?:cypher)?\s*", "", resp)
-        cypher_query = re.sub(r"\s*```$", "", cypher_query).strip()
+        cypher_query = assert_read_only_patient_scoped(re.sub(r"\s*```$", "", cypher_query))
 
         with driver.session() as session:
             records = session.run(cypher_query, patient_ids=patient_ids)
@@ -862,8 +928,8 @@ def retrieve(
     if not patient_ids:
         return []
 
-    intent = classify_intent(question)
-    print(f"[*] Graph Retrieval Intent: '{intent}' for patients: {patient_ids}")
+    intents = classify_intents(question)
+    print(f"[*] Graph Retrieval Intents: {intents} for patients: {patient_ids}")
 
     all_facts: List[Dict[str, Any]] = []
 
@@ -872,74 +938,89 @@ def retrieve(
         p_driver = driver or get_driver_for_patient(p_id)
         p_should_close = (driver is None)
         try:
-            if intent == "chemo_cycle_status":
-                facts = get_chemo_cycle_status(patient_id=p_id, driver=p_driver)
-                all_facts.extend(facts)
+            for intent in intents:
+                if intent == "chemo_cycle_status":
+                    facts = get_chemo_cycle_status(patient_id=p_id, driver=p_driver)
+                    all_facts.extend(facts)
 
-            elif intent == "suggested_vs_performed":
-                facts = get_suggested_vs_performed(patient_id=p_id, driver=p_driver)
-                all_facts.extend(facts)
+                elif intent == "suggested_vs_performed":
+                    facts = get_suggested_vs_performed(patient_id=p_id, driver=p_driver)
+                    all_facts.extend(facts)
 
-            elif intent == "improvement_trend":
-                # Extract optional test name
-                test_match = None
-                for candidate in ["hemoglobin", "platelet", "creatinine", "sgot", "sgpt", "bilirubin", "sugar", "wbc"]:
-                    if candidate in question.lower():
-                        test_match = candidate
-                        break
-                facts = get_improvement_trend(patient_id=p_id, test_name=test_match, driver=p_driver)
-                all_facts.extend(facts)
+                elif intent == "improvement_trend":
+                    # Extract optional test name
+                    test_match = None
+                    for candidate in ["hemoglobin", "platelet", "creatinine", "sgot", "sgpt", "bilirubin", "sugar", "wbc"]:
+                        if candidate in question.lower():
+                            test_match = candidate
+                            break
+                    facts = get_improvement_trend(patient_id=p_id, test_name=test_match, driver=p_driver)
+                    all_facts.extend(facts)
 
-            elif intent == "specific_lab_value":
-                # Extract test name and date hints
-                test_match = "Random Blood Sugar"  # default for sugar queries
-                for candidate_name, canonical in [("hemoglobin", "Hemoglobin"), ("platelet", "Platelet Count"),
-                                                   ("creatinine", "Serum Creatinine"), ("sugar", "Random Blood Sugar"),
-                                                   ("glucose", "Random Blood Sugar"), ("sgot", "SGOT (AST)"),
-                                                   ("sgpt", "SGPT (ALT)")]:
-                    if candidate_name in question.lower():
-                        test_match = canonical
-                        break
-                # Try to extract a date/period from the question
-                date_match = None
-                date_patterns = re.findall(r'(\d{4}[-/]\d{1,2}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s*\d{4}|\d{1,2}[-/]\d{4})', question.lower())
-                if date_patterns:
-                    date_match = date_patterns[0]
-                facts = get_specific_lab_value(patient_id=p_id, test_name=test_match, target_date=date_match, driver=p_driver)
-                all_facts.extend(facts)
+                elif intent == "specific_lab_value":
+                    # Extract test name and date hints
+                    # No default: guessing one test answers a question nobody asked.
+                    test_match = None
+                    for candidate_name, canonical in [("hemoglobin", "Hemoglobin"), ("platelet", "Platelet Count"),
+                                                       ("creatinine", "Serum Creatinine"), ("sugar", "Random Blood Sugar"),
+                                                       ("glucose", "Random Blood Sugar"), ("sgot", "SGOT (AST)"),
+                                                       ("sgpt", "SGPT (ALT)")]:
+                        if candidate_name in question.lower():
+                            test_match = canonical
+                            break
+                    # Try to extract a date/period from the question
+                    date_match = None
+                    date_patterns = re.findall(r'(\d{4}[-/]\d{1,2}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s*\d{4}|\d{1,2}[-/]\d{4})', question.lower())
+                    if date_patterns:
+                        date_match = date_patterns[0]
+                    if test_match:
+                        facts = get_specific_lab_value(patient_id=p_id, test_name=test_match, target_date=date_match, driver=p_driver)
+                    else:
+                        facts = get_lab_trend(patient_id=p_id, driver=p_driver)
+                    all_facts.extend(facts)
 
-            elif intent == "lab_trend":
-                # Extract optional test name from question if present
-                test_match = None
-                for candidate in ["hemoglobin", "platelet", "creatinine", "sgot", "sgpt", "bilirubin"]:
-                    if candidate in question.lower():
-                        test_match = candidate
-                        break
-                facts = get_lab_trend(patient_id=p_id, test_name=test_match, driver=p_driver)
-                all_facts.extend(facts)
+                elif intent == "lab_trend":
+                    # Extract optional test name from question if present
+                    test_match = None
+                    for candidate in ["hemoglobin", "platelet", "creatinine", "sgot", "sgpt", "bilirubin"]:
+                        if candidate in question.lower():
+                            test_match = candidate
+                            break
+                    facts = get_lab_trend(patient_id=p_id, test_name=test_match, driver=p_driver)
+                    all_facts.extend(facts)
 
-            elif intent == "diagnosis_list":
-                facts = get_diagnoses(patient_id=p_id, driver=p_driver)
-                all_facts.extend(facts)
+                elif intent == "diagnosis_list":
+                    facts = get_diagnoses(patient_id=p_id, driver=p_driver)
+                    all_facts.extend(facts)
 
-            elif intent == "medication_history":
-                facts = get_medication_history(patient_id=p_id, driver=p_driver)
-                all_facts.extend(facts)
+                elif intent == "medication_history":
+                    facts = get_medication_history(patient_id=p_id, driver=p_driver)
+                    all_facts.extend(facts)
 
-            elif intent == "staging_biomarker":
-                facts = get_staging_and_biomarkers(patient_id=p_id, driver=p_driver)
-                all_facts.extend(facts)
+                elif intent == "staging_biomarker":
+                    facts = get_staging_and_biomarkers(patient_id=p_id, driver=p_driver)
+                    all_facts.extend(facts)
 
-            else:
-                # Open-ended query
-                facts = open_ended_query(patient_ids=[p_id], question=question, driver=p_driver)
-                all_facts.extend(facts)
+                else:
+                    # Open-ended query
+                    facts = open_ended_query(patient_ids=[p_id], question=question, driver=p_driver)
+                    all_facts.extend(facts)
 
         finally:
             if p_should_close and p_driver is not None:
                 p_driver.close()
 
-    return all_facts
+    # Several intents can retrieve the same row; keep the first occurrence of each fact.
+    seen: Set[Tuple[str, str]] = set()
+    deduped: List[Dict[str, Any]] = []
+    for f in all_facts:
+        key = (f.get("patient_id") or "", f.get("text") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(f)
+
+    return deduped
 
 
 if __name__ == "__main__":

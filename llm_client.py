@@ -72,7 +72,9 @@ def _get_local_llama_client(model_path: Optional[str] = None) -> Any:
 
     from device_utils import get_llama_gpu_layers
 
-    n_ctx = int(os.getenv("LOCAL_LLM_N_CTX", "4096"))
+    # 8192 matches .env.example; the 4096 default used to truncate or reject the
+    # answer prompt whenever .env was absent, as it is inside the backend image.
+    n_ctx = int(os.getenv("LOCAL_LLM_N_CTX", "8192"))
     n_threads_env = os.getenv("LOCAL_LLM_N_THREADS")
     n_threads = int(n_threads_env) if n_threads_env and n_threads_env.isdigit() else None
     n_gpu_layers = get_llama_gpu_layers()
@@ -122,9 +124,18 @@ def _call_local(
             "content": m.get("content", ""),
         })
 
+    # Leave the reply whatever context the prompt did not use, so an unexpectedly long
+    # evidence block yields a shorter answer instead of "requested tokens exceed context".
+    max_tokens = 2048
+    try:
+        prompt_tokens = sum(len(llm.tokenize(m["content"].encode("utf-8"))) for m in formatted_messages)
+        max_tokens = max(256, min(max_tokens, int(llm.n_ctx()) - prompt_tokens - 64))
+    except Exception:
+        pass  # Sizing is an optimisation; let llama.cpp apply its own limits.
+
     response = llm.create_chat_completion(
         messages=formatted_messages,
-        max_tokens=2048,
+        max_tokens=max_tokens,
         temperature=0.1,
     )
 

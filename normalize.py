@@ -243,6 +243,94 @@ def canonicalize_lab_name(
     return raw_name.strip()
 
 
+# Cache of (regex, canonical) pairs for lab-test name resolution, longest canonical first.
+_LAB_NAME_PATTERNS: Optional[List[Tuple[Any, str]]] = None
+
+# Raw strings that are values, units or synthetic row ids rather than test names.
+_NOT_A_TEST_NAME = re.compile(
+    r"""^(?:
+          [\d.,:/<>=+\-\s]+                      # pure numbers / dates / operators
+        | [\d.,]+\s*[a-z/%µμ^\d.\s]*  # a value with a unit, e.g. '1.10 mg/dl'
+        | (?:lab)?result[_\s-]*\d*                # 'labresult_001', 'result'
+        )$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _lab_name_patterns(dict_dir: Optional[Path] = None) -> List[Tuple[Any, str]]:
+    """Build (whole-token regex, canonical) pairs for every LabTest/Biomarker dictionary key."""
+    global _LAB_NAME_PATTERNS
+    if _LAB_NAME_PATTERNS is not None and dict_dir is None:
+        return _LAB_NAME_PATTERNS
+
+    medical_dict, _ = load_normalization_dictionaries(dict_dir)
+    pairs = [
+        (k, v["canonical"])
+        for k, v in medical_dict.items()
+        if (v.get("type") or "") in ("LabTest", "Biomarker") and v.get("canonical")
+    ]
+    # Longest canonical first so 'MCH' beats 'Hemoglobin' on 'Mean Corp Hemoglobin (MCH)'.
+    pairs.sort(key=lambda kv: (-len(kv[1]), -len(kv[0])))
+    patterns = [
+        (re.compile(r"(?<![A-Za-z0-9])" + re.escape(k) + r"(?![A-Za-z0-9])", re.IGNORECASE), canonical)
+        for k, canonical in pairs
+    ]
+    if dict_dir is None:
+        _LAB_NAME_PATTERNS = patterns
+    return patterns
+
+
+def resolve_lab_test_name(
+    raw_name: str,
+    dict_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """
+    Resolve an LLM-extracted lab test label to a canonical test name, or None if the
+    label is not a test name at all.
+
+    LLM extraction routinely emits values, units, dates and synthetic row ids in the
+    test-name slot ('1.10 mg/dl', 'labresult_001', 'hemoglobin_11.5',
+    'Hemoglobin Result: 11.5 gm/dl'). Writing those as LabTest nodes both fills answers
+    with noise and splits one real test across several nodes, which destroys trends.
+
+    Resolution order:
+      1. Exact dictionary hit (delegates to `canonicalize_lab_name`).
+      2. Longest dictionary term appearing as a whole token anywhere in the label.
+      3. The label with any trailing 'result: <value> <unit>' tail stripped, if what
+         remains still looks like a test name.
+      4. None.
+    """
+    if not raw_name or not str(raw_name).strip():
+        return None
+
+    raw = str(raw_name).strip()
+    # Underscore-joined labels ('TOTAL_LEUCOCYTE_COUNT') must match space-separated keys.
+    raw = re.sub(r"_+", " ", raw).strip() if re.search(r"[A-Za-z]_[A-Za-z]", raw) else raw
+
+    # 1. Exact dictionary hit.
+    exact = canonicalize_lab_name(raw, dict_dir=dict_dir)
+    if exact and exact.upper() != raw.upper():
+        return exact
+
+    # 2. Longest dictionary term contained in the label.
+    for pattern, canonical in _lab_name_patterns(dict_dir):
+        if pattern.search(raw):
+            return canonical
+
+    # 3. Strip a trailing value tail ('Neutrophils Result: 70 %' -> 'Neutrophils').
+    trimmed = re.split(r"\b(?:result|value|level)s?\b\s*[:=-]?", raw, maxsplit=1, flags=re.IGNORECASE)[0]
+    trimmed = re.sub(r"[_\s:=-]+[\d.,]+.*$", "", trimmed).strip(" _:=-")
+
+    if not trimmed or len(trimmed) < 3 or len(trimmed) > 60:
+        return None
+    if _NOT_A_TEST_NAME.match(trimmed):
+        return None
+    if not re.search(r"[A-Za-z]{3}", trimmed):
+        return None
+
+    return trimmed
+
+
 def dictionary_match(
     term: str,
     min_similarity: float = 0.85,

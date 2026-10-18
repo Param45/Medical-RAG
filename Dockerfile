@@ -4,7 +4,8 @@ FROM python:3.11-slim
 # Prevent Python from writing .pyc files and enable unbuffered output
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=8000
+    PORT=8000 \
+    LOCAL_LLM_N_CTX=8192
 
 # Install Linux system dependencies (Poppler for PDF rendering, build tools for local LLM)
 RUN apt-get update && apt-get install -y --no-install-recommends \

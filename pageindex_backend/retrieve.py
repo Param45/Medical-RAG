@@ -29,6 +29,7 @@ if hasattr(sys.stdout, "reconfigure"):
 load_dotenv()
 
 from llm_client import chat
+from normalize import resolve_lab_test_name
 from patients import get_display_label
 
 
@@ -161,19 +162,28 @@ def resolve_structured_query(
             max_completed_record = max(completed_nums) if completed_nums else 0
             completed = user_completed if user_completed is not None else max_completed_record
 
-            planned = plan.get("planned_cycles") or 8
+            planned = plan.get("planned_cycles")
             regimen = plan.get("regimen") or "Chemotherapy"
-            remaining = max(0, planned - completed)
 
             evidence_ids = [c.get("evidence_id") for c in chemo_cycles if c.get("evidence_id")]
             if plan.get("evidence_id"):
                 evidence_ids.append(plan.get("evidence_id"))
-            ev_id = evidence_ids[0] if evidence_ids else f"{patient_id}__chemo_cycle_record"
+            # Minting an id would pass the grounding check and then resolve to nothing
+            # in the evidence inspector, so an unsourced fact stays uncited.
+            ev_id = evidence_ids[0] if evidence_ids else ""
 
-            text = (
-                f"Chemotherapy cycle status: Patient has completed {completed} of {planned} planned cycles "
-                f"of {regimen}. Exactly {remaining} cycles are remaining."
-            )
+            if planned:
+                remaining = max(0, int(planned) - completed)
+                text = (
+                    f"Chemotherapy cycle status: Patient has completed {completed} of {planned} planned cycles "
+                    f"of {regimen}. Exactly {remaining} cycles are remaining."
+                )
+            else:
+                text = (
+                    f"Chemotherapy cycle status: Patient has completed {completed} documented cycles "
+                    f"of {regimen}. The total planned number of cycles is not documented in the available "
+                    f"records, so the number remaining cannot be determined."
+                )
             return [{
                 "text": text,
                 "patient_id": patient_id,
@@ -191,7 +201,7 @@ def resolve_structured_query(
             pending = [t.get("test_name") for t in suggested_tests if not t.get("performed") and t.get("test_name")]
 
             ev_ids = [t.get("evidence_id") for t in suggested_tests if t.get("evidence_id")]
-            ev_id = ev_ids[0] if ev_ids else f"{patient_id}__suggested_tests"
+            ev_id = ev_ids[0] if ev_ids else ""
 
             s_str = ", ".join(suggested_all) if suggested_all else "None documented"
             p_str = ", ".join(performed) if performed else "None of the suggested tests have been performed yet"
@@ -213,32 +223,40 @@ def resolve_structured_query(
     # 3. Lab time series / trends / specific lab values
     lab_series = structured_facts.get("lab_time_series", [])
     if lab_series:
-        try:
-            from normalize import canonicalize_lab_name
-            test_canonical = canonicalize_lab_name(question)
-        except Exception:
-            test_canonical = None
-        target_name = test_canonical.strip().lower() if test_canonical else None
-
-        matching_labs = []
+        # Group by resolved test name. Extraction stores values and row ids in the test
+        # slot ('1.10 mg/dL', 'LabResult_001') and spells one test several ways, so an
+        # ungrouped match reported points from different tests as a single test's trend.
+        by_test: Dict[str, List[Dict[str, Any]]] = {}
         for item in lab_series:
-            t_name = (item.get("test") or "").strip().lower()
-            if target_name and (target_name in t_name or t_name in target_name):
-                matching_labs.append(item)
-            elif not target_name:
-                for kw in ["sugar", "glucose", "creatinine", "hemoglobin", "hb", "platelet", "wbc"]:
-                    if kw in q_lower and kw in t_name:
-                        matching_labs.append(item)
-                        break
+            resolved = resolve_lab_test_name(item.get("test") or "")
+            if resolved:
+                by_test.setdefault(resolved, []).append(item)
 
-        if matching_labs:
-            matching_labs.sort(key=lambda x: x.get("date") or "0000-00-00")
-            first = matching_labs[0]
-            last = matching_labs[-1]
-            first_flag = first.get("abnormal_flag", "normal")
-            last_flag = last.get("abnormal_flag", "normal")
+        # Resolve every 1-3 word phrase in the question through the same dictionary used
+        # to name the series, so 'creatinine' finds 'Serum Creatinine' and a question
+        # naming two tests gets a fact for each.
+        words = re.findall(r"[a-z0-9()./-]+", q_lower)
+        asked: List[str] = []
+        for size in (3, 2, 1):
+            for i in range(len(words) - size + 1):
+                canonical = resolve_lab_test_name(" ".join(words[i:i + size]))
+                if canonical in by_test and canonical not in asked:
+                    asked.append(canonical)
 
-            if first_flag in ("low", "high") and last_flag == "normal":
+        facts: List[Dict[str, Any]] = []
+        for name in asked:
+            # The same result is often extracted from several pages of one report.
+            points = list({
+                (str(p.get("date")), str(p.get("value"))): p for p in by_test[name]
+            }.values())
+            points.sort(key=lambda x: x.get("date") or "0000-00-00")
+            first, last = points[0], points[-1]
+            first_flag = first.get("abnormal_flag") or "normal"
+            last_flag = last.get("abnormal_flag") or "normal"
+
+            if len(points) < 2:
+                direction = "a single recorded value — not enough data points for a trend"
+            elif first_flag in ("low", "high") and last_flag == "normal":
                 direction = "improving"
             elif first_flag == "normal" and last_flag in ("low", "high"):
                 direction = "worsening"
@@ -248,23 +266,20 @@ def resolve_structured_query(
                 direction = "stable/normal"
 
             series_str = "; ".join(
-                f"{l.get('value')} {l.get('unit') or ''} ({l.get('abnormal_flag') or 'normal'}) on {l.get('date') or 'undated'}"
-                for l in matching_labs
+                f"{p.get('value')} {p.get('unit') or ''} ({p.get('abnormal_flag') or 'normal'}) on {p.get('date') or 'undated'}"
+                for p in points
             )
 
-            text = (
-                f"{matching_labs[0].get('test')} trend: {series_str}. "
-                f"Overall trend: {direction}."
-            )
-            ev_id = last.get("evidence_id") or first.get("evidence_id") or f"{patient_id}__lab_trend"
-
-            return [{
-                "text": text,
+            facts.append({
+                "text": f"{name}: {series_str}. Overall trend: {direction}.",
                 "patient_id": patient_id,
-                "evidence_id": ev_id,
+                "evidence_id": last.get("evidence_id") or first.get("evidence_id") or "",
                 "confidence": 1.0,
-                "node_id": "structured_facts_lab_trend",
-            }]
+                "node_id": f"structured_facts_lab_{name.lower().replace(' ', '_')}",
+            })
+
+        if facts:
+            return facts
 
     return None
 

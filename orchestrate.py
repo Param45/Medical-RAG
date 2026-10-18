@@ -86,6 +86,55 @@ def is_numeric_or_count_query(question: str) -> bool:
     return False
 
 
+# Character budget for the evidence block in the answer prompt. Sized to leave room
+# for the system prompt and the model's reply inside an 8K-token local context.
+FACTS_BLOCK_BUDGET = 15000
+
+
+def build_facts_block(
+    facts: List[Dict[str, Any]],
+    budget: int = FACTS_BLOCK_BUDGET,
+) -> str:
+    """
+    Render retrieved facts for the answer prompt within a character budget.
+
+    The budget is shared equally between the patients present, because truncating
+    the joined block from the tail used to drop the last patient's evidence almost
+    entirely in cohort mode — a two-patient comparison answered from one patient.
+    """
+    order: List[str] = []
+    by_patient: Dict[str, List[Dict[str, Any]]] = {}
+    for f in facts:
+        p_id = f.get("patient_id") or "unknown"
+        if p_id not in by_patient:
+            by_patient[p_id] = []
+            order.append(p_id)
+        by_patient[p_id].append(f)
+
+    if not order:
+        return ""
+
+    per_patient = max(1, budget // len(order))
+    blocks: List[str] = []
+    idx = 0
+
+    for p_id in order:
+        used = 0
+        p_label = get_display_label(p_id)
+        for f in by_patient[p_id]:
+            idx += 1
+            ev_id = f.get("evidence_id") or "N/A"
+            # Collapse inner whitespace for prompt readability.
+            snippet = " ".join((f.get("text") or "").split())[:1000]
+            line = f"Fact {idx} [Patient: {p_label} ({p_id})] [Citation ID: {ev_id}]:\n\"{snippet}\"\n"
+            if used + len(line) > per_patient and used > 0:
+                break
+            blocks.append(line)
+            used += len(line)
+
+    return "\n".join(blocks)
+
+
 def generate_answer(
     question: str,
     facts: List[Dict[str, Any]],
@@ -112,18 +161,7 @@ def generate_answer(
         f.get("evidence_id") for f in facts if f.get("evidence_id")
     }
 
-    # Format facts for the prompt
-    fact_lines = []
-    for idx, f in enumerate(facts, 1):
-        p_id = f.get("patient_id", "unknown")
-        p_label = get_display_label(p_id)
-        ev_id = f.get("evidence_id", "N/A")
-        txt = (f.get("text") or "").strip()
-        # Clean redundant inner newlines for prompt readability
-        cleaned_snippet = " ".join(txt.split())[:1000]
-        fact_lines.append(f"Fact {idx} [Patient: {p_label} ({p_id})] [Citation ID: {ev_id}]:\n\"{cleaned_snippet}\"\n")
-
-    facts_block = "\n".join(fact_lines)[:15000]
+    facts_block = build_facts_block(facts)
 
     # Distinct patient IDs in retrieved facts
     patient_ids_in_facts = list({f.get("patient_id") for f in facts if f.get("patient_id")})

@@ -32,7 +32,7 @@ load_dotenv()
 
 from patients import all_patient_ids, get_display_label
 from llm_client import chat
-from normalize import canonicalize_lab_name, compute_abnormal_flag
+from normalize import canonicalize_lab_name, compute_abnormal_flag, resolve_lab_test_name
 
 
 # Temporary session Neo4j instance configuration (defaults allow seamless container startup without Azure env config)
@@ -496,9 +496,12 @@ def write_triples_to_neo4j(
                     written_count += 1
 
             elif relation == "HAS_RESULT":
-                # Canonicalize lab test name to prevent duplicate nodes
                 raw_test_name = str(obj_name or props.get("test_name", "")).strip()
-                test_name = canonicalize_lab_name(raw_test_name)
+                # Reject values/units/row-ids the extractor puts in the test-name slot, and
+                # merge spelling variants so one test keeps one node (and therefore one trend).
+                test_name = resolve_lab_test_name(raw_test_name)
+                if raw_test_name and not test_name:
+                    print(f"  [SKIP] Lab result discarded: {raw_test_name!r} is not a test name")
                 val = str(props.get("value", "")).strip()
                 unit = str(props.get("unit", "")).strip()
                 # Use result_date if available, fall back to date, then report_date
@@ -576,7 +579,7 @@ def write_triples_to_neo4j(
             elif relation == "SUGGESTS_TEST":
                 # Test was SUGGESTED/ADVISED but not necessarily performed
                 raw_test = str(obj_name).strip()
-                canonical_test = canonicalize_lab_name(raw_test)
+                canonical_test = resolve_lab_test_name(raw_test) or canonicalize_lab_name(raw_test)
                 suggest_date = str(props.get("date") or report_date or "").strip()
                 if canonical_test:
                     # Determine target node label
