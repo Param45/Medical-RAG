@@ -205,7 +205,10 @@ def build_structured_facts(
         "current_medications": [],
     }
 
-    # Attempt to populate from Neo4j
+    # Attempt to populate from Neo4j.
+    # evidence_id is a property of the relationship, never of the Report node — reading
+    # r.evidence_id yielded None for every row, so every structured fact was uncited and
+    # the answer layer had nothing to ground a citation on.
     neo4j_success = False
     try:
         from graph_backend.build import get_driver_for_patient
@@ -214,9 +217,9 @@ def build_structured_facts(
             # 1. Chemo administrations
             c_res = session.run(
                 """
-                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[:HAS_CHEMO_ADMIN]->(ca:ChemoAdministration)
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[rel:HAS_CHEMO_ADMIN]->(ca:ChemoAdministration)
                 RETURN ca.cycle_number AS cycle_number, ca.regimen AS regimen,
-                       ca.date AS administration_date, r.evidence_id AS evidence_id
+                       ca.date AS administration_date, rel.evidence_id AS evidence_id
                 ORDER BY ca.cycle_number ASC, ca.date ASC
                 """,
                 pid=patient_id,
@@ -232,8 +235,8 @@ def build_structured_facts(
             # 2. Treatment plan
             tp_res = session.run(
                 """
-                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[:HAS_TREATMENT_PLAN]->(tp:TreatmentPlan)
-                RETURN tp.regimen AS regimen, tp.planned_cycles AS planned_cycles, r.evidence_id AS evidence_id
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[rel:HAS_TREATMENT_PLAN]->(tp:TreatmentPlan)
+                RETURN tp.regimen AS regimen, tp.planned_cycles AS planned_cycles, rel.evidence_id AS evidence_id
                 LIMIT 1
                 """,
                 pid=patient_id,
@@ -249,10 +252,10 @@ def build_structured_facts(
             # 3. Lab time series
             l_res = session.run(
                 """
-                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[:HAS_RESULT]->(lr:LabResult)-[:OF_TEST]->(lt:LabTest)
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[rel:HAS_RESULT]->(lr:LabResult)-[:OF_TEST]->(lt:LabTest)
                 RETURN lt.canonical_name AS test, lr.value AS value, lr.unit AS unit,
                        coalesce(lr.result_date, lr.date, r.report_date) AS date,
-                       lr.abnormal_flag AS abnormal_flag, r.evidence_id AS evidence_id
+                       lr.abnormal_flag AS abnormal_flag, rel.evidence_id AS evidence_id
                 ORDER BY date ASC, lt.canonical_name ASC
                 """,
                 pid=patient_id,
@@ -270,8 +273,8 @@ def build_structured_facts(
             # 4. Suggested vs performed
             s_res = session.run(
                 """
-                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[:SUGGESTS_TEST]->(lt:LabTest)
-                RETURN lt.canonical_name AS test_name, r.report_date AS suggested_date, r.evidence_id AS evidence_id
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[rel:SUGGESTS_TEST]->(lt:LabTest)
+                RETURN lt.canonical_name AS test_name, r.report_date AS suggested_date, rel.evidence_id AS evidence_id
                 """,
                 pid=patient_id,
             )
@@ -295,8 +298,9 @@ def build_structured_facts(
             # 5. Medications
             m_res = session.run(
                 """
-                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[:PRESCRIBES]->(m:Medication)
-                RETURN m.canonical_name AS name, r.report_date AS start_date, r.evidence_id AS evidence_id
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[rel:ADMINISTERED]->(m:Medication)
+                RETURN m.canonical_name AS name, r.report_date AS start_date,
+                       rel.dose AS dose, rel.evidence_id AS evidence_id
                 """,
                 pid=patient_id,
             )
