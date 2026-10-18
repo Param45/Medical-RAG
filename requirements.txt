@@ -1,5 +1,19 @@
-# Medical Records RAG — Streamlit Community Cloud Frontend Dependencies
-streamlit>=1.35.0
-requests>=2.31.0
-Pillow>=10.0.0
-python-dotenv>=1.0.1
+# Medical Records RAG — full local development install.
+#
+# The deployed split installs the two files below separately: the Streamlit
+# Community Cloud frontend uses requirements-frontend.txt, the Azure container
+# uses requirements-backend.txt. Running app.py locally in direct mode exercises
+# both halves in one process, so this file pulls in both rather than repeating
+# either list (which previously duplicated the frontend list and left the
+# documented quickstart unable to answer a single question).
+#
+# llama-cpp-python ships prebuilt CPU wheels from a separate index. Without it,
+# pip builds from source and needs CMake plus a C++ compiler:
+#   pip install -r requirements.txt \
+#     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+#
+# pdf2image also needs the poppler binaries, either on PATH or pointed at by
+# POPPLER_PATH. See the Prerequisites section of README.md.
+
+-r requirements-frontend.txt
+-r requirements-backend.txt

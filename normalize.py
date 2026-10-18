@@ -787,16 +787,8 @@ def llm_normalize(
         response = chat([{"role": "user", "content": prompt}], task="build")
         if not response or response.strip() == "null":
             return None
-        raw_resp = response.strip()
-        # Remove any reasoning/thought tags from local model if present
-        raw_resp = re.sub(r"<thought>.*?</thought>", "", raw_resp, flags=re.DOTALL).strip()
-        match = re.search(r"(\{.*\})", raw_resp, re.DOTALL)
-        if match:
-            raw_resp = match.group(1)
-        elif raw_resp.startswith("```"):
-            raw_resp = re.sub(r"^```(?:json)?\s*", "", raw_resp)
-            raw_resp = re.sub(r"\s*```$", "", raw_resp)
-        data = json.loads(raw_resp.strip())
+        from llm_client import parse_json_object
+        data = parse_json_object(response)
         if isinstance(data, dict) and "canonical" in data and "type" in data:
             return NormalizedEntity(
                 raw_text=term,

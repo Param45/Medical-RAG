@@ -7,7 +7,11 @@ font = "sans serif"
 
 [client]
 toolbarMode = "minimal"
-showErrorDetails = false
+# Errors surfaced as a bare "Oh no" with no detail make every failure in this app
+# undiagnosable, including ones the operator needs to see (a backend that is down,
+# a missing index, an expired key). Shown in full for the demo; narrow this if the
+# app is ever exposed to users who should not see internals.
+showErrorDetails = true
 
 [browser]
 gatherUsageStats = false

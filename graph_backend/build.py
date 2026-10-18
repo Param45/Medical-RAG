@@ -31,7 +31,7 @@ if hasattr(sys.stdout, "reconfigure"):
 load_dotenv()
 
 from patients import all_patient_ids, get_display_label
-from llm_client import chat
+from llm_client import chat, parse_json_list
 from normalize import canonicalize_lab_name, compute_abnormal_flag, resolve_lab_test_name
 
 
@@ -69,23 +69,55 @@ def get_driver(
             "NEO4J_URI or NEO4J_PASSWORD is not set in environment / .env file."
         )
 
+    # The +ssc schemes encrypt but do not verify the server certificate, so falling
+    # back to them silently turns off authentication of the database on a link
+    # carrying patient records — and makes a TLS-intercepting proxy indistinguishable
+    # from an attacker. The fallback therefore has to be asked for explicitly.
+    allow_unverified = (os.getenv("NEO4J_ALLOW_SELF_SIGNED_CERT", "").strip().lower()
+                        in ("1", "true", "yes"))
+
     uris_to_try = [uri]
-    if uri.startswith("neo4j+s://"):
-        uris_to_try.append(uri.replace("neo4j+s://", "neo4j+ssc://"))
-    elif uri.startswith("bolt+s://"):
-        uris_to_try.append(uri.replace("bolt+s://", "bolt+ssc://"))
+    if allow_unverified:
+        if uri.startswith("neo4j+s://"):
+            uris_to_try.append(uri.replace("neo4j+s://", "neo4j+ssc://"))
+        elif uri.startswith("bolt+s://"):
+            uris_to_try.append(uri.replace("bolt+s://", "bolt+ssc://"))
 
     last_error: Optional[Exception] = None
     for target_uri in uris_to_try:
         try:
             driver = GraphDatabase.driver(target_uri, auth=(username, password))
             driver.verify_connectivity()
+            if target_uri != uri:
+                print(
+                    "[NEO4J] WARNING: connected with certificate verification DISABLED "
+                    f"({target_uri.split('://')[0]}://) because "
+                    "NEO4J_ALLOW_SELF_SIGNED_CERT is set. The server's identity is NOT "
+                    "verified. Use this only against a trusted network or a local instance."
+                )
             return driver
         except Exception as exc:
             last_error = exc
 
+    # The driver buries a cert failure two levels inside an ExceptionGroup under a
+    # generic ServiceUnavailable, so search the formatted traceback rather than
+    # trying to match a particular nesting shape.
+    hint = ""
+    if not allow_unverified and uri.startswith(("neo4j+s://", "bolt+s://")):
+        import traceback
+        detail = "".join(
+            traceback.format_exception(type(last_error), last_error, last_error.__traceback__)
+        ) if last_error else ""
+        if "CERTIFICATE_VERIFY" in detail.upper():
+            hint = (
+                "\nThe server certificate could not be verified, which usually means a "
+                "TLS-intercepting proxy or antivirus sits on the path. Fix the trust store, "
+                "or — accepting that the database identity will then NOT be checked — set "
+                "NEO4J_ALLOW_SELF_SIGNED_CERT=true."
+            )
+
     raise RuntimeError(
-        f"Failed to connect to Neo4j instance at {uri}: {last_error}"
+        f"Failed to connect to Neo4j instance at {uri}: {last_error}{hint}"
     ) from last_error
 
 
@@ -237,6 +269,10 @@ INSTRUCTIONS:
 1. Extract ONLY facts explicitly stated in the chunk text and pre-normalized entities.
 2. Use canonical names where pre-normalized entities are supplied.
 3. If no relevant clinical entities or relations exist in the chunk, return an empty list [].
+3a. OMIT any relation you did not find. Never emit a placeholder triple with a null,
+    empty or "None" object_name — emit only triples carrying a real documented fact.
+3b. Reply with the JSON array ONLY. No reasoning, commentary, explanation or markdown
+    before or after it.
 4. Output MUST be valid JSON: a list of objects with the exact schema:
 [
   {
@@ -301,20 +337,9 @@ def extract_triples(
         if not response_text or not response_text.strip():
             return []
 
-        raw_resp = response_text.strip()
-        # Remove any reasoning/thought tags from local model if present
-        raw_resp = re.sub(r"<thought>.*?</thought>", "", raw_resp, flags=re.DOTALL).strip()
-
-        # Extract JSON array block if enclosed in text/markdown
-        match = re.search(r"(\[\s*\{.*\}\s*\])", raw_resp, re.DOTALL)
-        if match:
-            raw_resp = match.group(1)
-        elif raw_resp.startswith("```"):
-            raw_resp = re.sub(r"^```(?:json)?\s*", "", raw_resp)
-            raw_resp = re.sub(r"\s*```$", "", raw_resp)
-
-        parsed = json.loads(raw_resp.strip())
-        if not isinstance(parsed, list):
+        parsed = parse_json_list(response_text)
+        if not parsed:
+            print(f"  [WARN] No parseable triples in reply for {report_id}")
             return []
 
         # Schema validation: reject any triple with off-schema labels/relations
@@ -325,6 +350,12 @@ def extract_triples(
             relation = item.get("relation", "")
             subject_label = item.get("subject_label", "")
             object_label = item.get("object_label", "")
+
+            # The local model emits a placeholder triple for every relation it did
+            # not find, with object_name null. They carry no fact and, unfiltered,
+            # bloat the reply until it is truncated mid-object.
+            if not str(item.get("object_name") or "").strip() and not item.get("properties"):
+                continue
 
             # Reject off-schema relations
             if relation not in VALID_RELATION_TYPES:
@@ -830,6 +861,14 @@ def build_all_patients(driver=None) -> Dict[str, Dict[str, Any]]:
     print("==================================================")
     for p_id, stats in all_stats.items():
         print(f"[{p_id}] Chunks: {stats['total_chunks']}, Extracted: {stats['triples_extracted']}, Written: {stats['triples_written']}")
+        # A build that writes nothing used to look like a success and left an empty
+        # graph that only showed up later as "Not documented in the available records".
+        if stats["total_chunks"] and not stats["triples_written"]:
+            print(
+                f"[{p_id}] WARNING: no facts were written from {stats['total_chunks']} chunks. "
+                "The graph for this patient is EMPTY and every query will come back "
+                "undocumented. Check the extraction warnings above."
+            )
     print("==================================================")
     return all_stats
 

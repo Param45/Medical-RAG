@@ -16,12 +16,26 @@ from pdf2image import convert_from_path
 
 def _find_poppler_path() -> Optional[str]:
     """
-    Helper to locate poppler bin directory on Windows if not already on PATH.
+    Locate the poppler bin directory on Windows when it is not already on PATH.
+
+    Returns None when poppler is on PATH (pdf2image then finds it itself), or when
+    it cannot be found at all — in which case pdf2image raises a clear
+    PDFInfoNotInstalledError rather than this function guessing.
     """
+    # Explicit override wins: installers put poppler in unpredictable places, and a
+    # PATH entry added by an installer is not visible to already-running processes.
+    env_path = (os.environ.get("POPPLER_PATH") or "").strip()
+    if env_path:
+        candidate = Path(env_path)
+        # Accept either the bin directory or the install root.
+        for p in (candidate, candidate / "bin", candidate / "Library" / "bin"):
+            if (p / "pdftoppm.exe").exists() or (p / "pdftoppm").exists():
+                return str(p)
+        print(f"Warning: POPPLER_PATH={env_path!r} does not contain pdftoppm; ignoring it.")
+
     if shutil.which("pdftoppm"):
         return None
-    
-    # Specific known Windows installation paths for poppler
+
     known_paths = [
         Path(r"C:\Program Files\poppler\bin"),
         Path(r"C:\Program Files (x86)\poppler\bin"),
@@ -32,6 +46,18 @@ def _find_poppler_path() -> Optional[str]:
     for p in known_paths:
         if (p / "pdftoppm.exe").exists():
             return str(p)
+
+    # winget installs under a versioned package directory, so glob rather than
+    # hardcode the version.
+    for root in (
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages",
+        Path(os.environ.get("ProgramFiles", "")) / "WinGet" / "Packages",
+    ):
+        if not root.is_dir():
+            continue
+        for exe in sorted(root.glob("*Poppler*/**/pdftoppm.exe"), reverse=True):
+            return str(exe.parent)
+
     return None
 
 

@@ -12,3 +12,11 @@ huggingface_hub>=0.20.0
 requests>=2.31.0
 llama-cpp-python>=0.3.0
 pytest>=8.0.0
+
+# Cloud LLM providers. google-genai is required whenever LLM_PROVIDER_EXTERNAL is
+# gemini, which is how the persistent GraphRAG/PageIndex rebuild runs — the local
+# GGUF model is used for query answering and the ephemeral upload sandbox only.
+google-genai>=1.0.0
+# Uncomment for the other providers llm_client supports:
+# anthropic>=0.40.0
+# openai>=1.40.0

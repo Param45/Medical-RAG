@@ -12,6 +12,7 @@ Supports both Cloud APIs (Gemini, Anthropic, OpenAI) and Local LLMs (MedGemma GG
 Includes a single retry on transient errors.
 """
 
+import json
 import os
 import re
 import threading
@@ -128,7 +129,10 @@ def _call_local(
 
     # Leave the reply whatever context the prompt did not use, so an unexpectedly long
     # evidence block yields a shorter answer instead of "requested tokens exceed context".
-    max_tokens = 2048
+    # The ceiling must clear a full extraction reply: this model prefaces its JSON
+    # with several hundred words of reasoning, and at 2048 the JSON was cut off
+    # mid-object. Generation still stops at EOS, so a higher ceiling costs nothing.
+    max_tokens = int(os.getenv("LOCAL_LLM_MAX_TOKENS") or 4096)
     try:
         prompt_tokens = sum(len(llm.tokenize(m["content"].encode("utf-8"))) for m in formatted_messages)
         max_tokens = max(256, min(max_tokens, int(llm.n_ctx()) - prompt_tokens - 64))
@@ -256,6 +260,123 @@ def _call_openai(
     )
     choice = response.choices[0]
     return choice.message.content or ""
+
+
+# ==============================================================================
+# TOLERANT JSON PARSING OF MODEL OUTPUT
+#
+# The local GGUF model does not honour "reply with JSON only". It emits a bare
+# "thought" channel marker followed by several hundred words of reasoning, and the
+# JSON that follows is frequently cut off mid-object when the reply hits its token
+# ceiling. Both callers used a greedy regex plus a single json.loads, so any such
+# reply raised and the whole chunk was dropped — which is how a rebuild on the
+# local model produced a graph with no clinical facts at all.
+# ==============================================================================
+
+# MedGemma/Gemma emit a channel marker on its own line before reasoning.
+_REASONING_PREFIX = re.compile(
+    r"^\s*(?:<?thought>?|<?think>?|model|assistant)\s*\n", re.IGNORECASE
+)
+_REASONING_TAGS = re.compile(r"<(thought|think|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
+
+
+def strip_model_preamble(text: str) -> str:
+    """Remove reasoning channels and markdown fences from a model reply."""
+    cleaned = (text or "").strip()
+    cleaned = _REASONING_TAGS.sub("", cleaned).strip()
+    cleaned = _REASONING_PREFIX.sub("", cleaned).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _salvage_objects(fragment: str) -> List[Any]:
+    """
+    Recover every complete top-level {...} object from a possibly truncated array,
+    by scanning braces outside of string literals. A reply cut off mid-object keeps
+    the facts that were already complete instead of losing the whole chunk.
+    """
+    objects: List[Any] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escaped = False
+
+    for i, ch in enumerate(fragment):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    objects.append(json.loads(fragment[start:i + 1]))
+                except json.JSONDecodeError:
+                    pass  # incomplete or malformed object; keep the rest
+                start = -1
+            elif depth < 0:
+                depth = 0
+    return objects
+
+
+def parse_json_list(text: str) -> List[Any]:
+    """
+    Parse a list of JSON objects out of a model reply, tolerating reasoning
+    preambles, markdown fences, trailing prose and truncation.
+
+    Returns [] when nothing parseable is present.
+    """
+    cleaned = strip_model_preamble(text)
+    if not cleaned:
+        return []
+
+    # Whole reply is already a JSON array.
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            return [parsed]
+    except json.JSONDecodeError:
+        pass
+
+    # Otherwise locate a real array start ('[' followed by '{') and salvage from
+    # there. Anchoring matters: reasoning prose carries both '[' (from Cypher-style
+    # sketches) and an odd number of quotes, which would desynchronise the scanner.
+    # The answer follows the reasoning, so later candidates are tried first.
+    for match in reversed(list(re.finditer(r"\[\s*\{", cleaned))):
+        objects = _salvage_objects(cleaned[match.start():])
+        if objects:
+            return objects
+
+    return _salvage_objects(cleaned)
+
+
+def parse_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Parse a single JSON object out of a model reply. None when absent."""
+    cleaned = strip_model_preamble(text)
+    if not cleaned or cleaned.strip().lower() == "null":
+        return None
+    try:
+        parsed = json.loads(cleaned)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+    for obj in _salvage_objects(cleaned):
+        if isinstance(obj, dict):
+            return obj
+    return None
 
 
 # ==============================================================================
