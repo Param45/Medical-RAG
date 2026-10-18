@@ -223,6 +223,81 @@ VALID_RELATION_TYPES = {
 }
 
 
+# JSON schema used to constrain local decoding. The enums are the same sets above,
+# so a constrained model cannot emit an off-schema relation or label at all —
+# object_name is required and non-empty, which also rules out the placeholder
+# triples the local model used to pad its reply with until it was truncated.
+def build_extraction_schema(max_triples: int) -> Dict[str, Any]:
+    """Extraction schema with the array bounded to `max_triples` items."""
+    schema = json.loads(json.dumps(EXTRACTION_JSON_SCHEMA))
+    schema["properties"]["triples"]["maxItems"] = max(1, int(max_triples))
+    return schema
+
+
+def triple_budget_for(ocr_confidence: Optional[float], text_length: int) -> int:
+    """
+    How many facts a chunk is allowed to yield.
+
+    A flat cap is filled regardless of how much the text supports: on a page scoring
+    0.936 OCR confidence, containing one legible fact, the model produced twelve.
+    Unreadable text cannot support many facts, so the budget scales with OCR
+    confidence and with how much text there is to draw on. This bounds invention in
+    proportion to evidence instead of trusting the model to abstain.
+    """
+    ceiling = int(os.getenv("EXTRACTION_MAX_TRIPLES") or 12)
+    conf = ocr_confidence if isinstance(ocr_confidence, (int, float)) else None
+
+    if conf is None:
+        budget = ceiling
+    elif conf >= 0.99:
+        budget = ceiling
+    elif conf >= 0.975:
+        budget = max(1, int(ceiling * 0.75))
+    elif conf >= 0.95:
+        budget = max(1, int(ceiling * 0.4))
+    else:
+        budget = max(1, int(ceiling * 0.25))
+
+    # A 126-character fragment cannot document eight facts whatever its OCR score.
+    # ~100 chars per fact: the densest clean chunk in the gold set carries 7 facts in
+    # 797 characters, so a tighter divisor would cost real recall on dense reports.
+    budget = min(budget, max(1, text_length // 100))
+    return budget
+
+
+EXTRACTION_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "triples": {
+            "type": "array",
+            # An unbounded array is a repetition trap: under greedy sampling the model
+            # kept emitting items until max_tokens, producing 72 "facts" for a chunk
+            # containing 3 (68 of them invented) and taking 11 minutes. The bound makes
+            # the grammar close the array; minItems 0 keeps "nothing here" expressible,
+            # which chunk 6 of the gold set requires.
+            "minItems": 0,
+            "maxItems": int(os.getenv("EXTRACTION_MAX_TRIPLES") or 12),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject_label": {"type": "string", "enum": sorted(VALID_NODE_LABELS)},
+                    "subject_name": {"type": "string"},
+                    "relation": {"type": "string", "enum": sorted(VALID_RELATION_TYPES)},
+                    "object_label": {"type": "string", "enum": sorted(VALID_NODE_LABELS)},
+                    "object_name": {"type": "string", "minLength": 1},
+                    "properties": {"type": "object"},
+                },
+                "required": [
+                    "subject_label", "subject_name", "relation",
+                    "object_label", "object_name",
+                ],
+            },
+        }
+    },
+    "required": ["triples"],
+}
+
+
 EXTRACTION_SYSTEM_PROMPT = """You are an expert clinical knowledge graph extraction assistant for general and specialized medical records.
 Your task is to extract structured medical entities and relationships from clinical report text into a strict knowledge graph schema.
 
@@ -271,8 +346,44 @@ INSTRUCTIONS:
 3. If no relevant clinical entities or relations exist in the chunk, return an empty list [].
 3a. OMIT any relation you did not find. Never emit a placeholder triple with a null,
     empty or "None" object_name — emit only triples carrying a real documented fact.
-3b. Reply with the JSON array ONLY. No reasoning, commentary, explanation or markdown
-    before or after it.
+3b. Reply with JSON ONLY. No reasoning, commentary, explanation or markdown before
+    or after it.
+4a. Return an object of the form {"triples": [ ... ]}.
+
+NEGATION AND UNCERTAINTY — READ BEFORE EXTRACTING
+A clinical report records what was looked for as much as what was found. Reporting a
+ruled-out finding as a diagnosis is worse than missing it: it puts a condition the
+patient does not have into their record.
+5a. NEVER extract a finding that the text negates. "No ascites", "no pericardial
+    effusion", "no evidence of metastasis", "ruled out", "within normal limits",
+    "unremarkable", "shows no abnormality" all mean the finding is ABSENT. Omit it.
+5b. NEVER turn an inconclusive or equivocal result into a positive one. "Inconclusive",
+    "indeterminate", "?significance", "suspicious", "cannot be excluded",
+    "awaited" are not diagnoses. Omit them.
+5c. Extract ONE clinical entity per triple. "Metastatic breast cancer with pleural
+    effusion" is TWO facts: a diagnosis of metastatic breast cancer and a diagnosis of
+    pleural effusion. Never join two findings with "and" or "with" in one object_name.
+5d. object_name must be the NAME of a thing, never a measurement. "11.0", "26/1.1",
+    "522000" and "9.3/4" are values. For a lab result, object_name is the test name
+    ("Platelet Count") and the number belongs in properties.value.
+5e. Choose the relation that matches the fact, not the first plausible one. A condition
+    the report states is STATES_DIAGNOSIS. A procedure the patient had is UNDERWENT. A
+    drug given is ADMINISTERED. A test advised but not yet done is SUGGESTS_TEST.
+    HAS_TREATMENT_PLAN is only for an explicitly documented future plan.
+
+WORKED EXAMPLE
+Chunk text: "CECT Chest: Metastatic carcinoma right breast with ascites. Advised LFT."
+Correct reply:
+{"triples": [
+  {"subject_label": "Report", "subject_name": "report_0001", "relation": "STATES_DIAGNOSIS",
+   "object_label": "Diagnosis", "object_name": "Metastatic Breast Cancer", "properties": {}},
+  {"subject_label": "Report", "subject_name": "report_0001", "relation": "STATES_DIAGNOSIS",
+   "object_label": "Diagnosis", "object_name": "Ascites", "properties": {}},
+  {"subject_label": "Patient", "subject_name": "patient_a", "relation": "UNDERWENT",
+   "object_label": "Procedure", "object_name": "CECT Chest", "properties": {}},
+  {"subject_label": "Report", "subject_name": "report_0001", "relation": "SUGGESTS_TEST",
+   "object_label": "LabTest", "object_name": "Liver Function Test", "properties": {}}
+]}
 4. Output MUST be valid JSON: a list of objects with the exact schema:
 [
   {
@@ -301,6 +412,8 @@ def extract_triples(
     report_type = report_meta.get("report_type", "CLINICAL_REPORT")
     report_date = report_meta.get("report_date", "")
 
+    budget = triple_budget_for(report_meta.get("confidence"), len(chunk_text or ""))
+
     # Format normalized entities for context
     norm_summary = []
     for ent in normalized_entities:
@@ -328,16 +441,27 @@ def extract_triples(
     use_cloud = not is_temp_patient(patient_id)
 
     try:
+        system_prompt = EXTRACTION_SYSTEM_PROMPT
+        if os.getenv("EXTRACTION_FEW_SHOT", "true").strip().lower() not in ("1", "true", "yes"):
+            # Ablation switch for the eval harness: drop the worked example only.
+            system_prompt = system_prompt.split("WORKED EXAMPLE")[0].rstrip()
+
         response_text = chat(
             messages=[{"role": "user", "content": prompt}],
-            system=EXTRACTION_SYSTEM_PROMPT,
+            system=system_prompt,
             task="build",
             use_external=use_cloud,
+            json_schema=build_extraction_schema(budget),
         )
         if not response_text or not response_text.strip():
             return []
 
         parsed = parse_json_list(response_text)
+        # Constrained decoding returns {"triples": [...]}; unconstrained replies are
+        # usually a bare array. Accept either.
+        if len(parsed) == 1 and isinstance(parsed[0], dict) and "triples" in parsed[0]:
+            inner = parsed[0].get("triples")
+            parsed = inner if isinstance(inner, list) else []
         if not parsed:
             print(f"  [WARN] No parseable triples in reply for {report_id}")
             return []

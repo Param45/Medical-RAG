@@ -1,0 +1,306 @@
+{
+  "_meta": {
+    "description": "Hand-annotated gold standard for triple extraction, patient_a chunks 0-7. Annotated by reading data/reports/patient_a_chunks.json raw_text directly, not by accepting any model's output.",
+    "why_not_a_model_reference": "The Gemini-built graph cannot serve as ground truth. It extracts Diagnosis 'Ascites' from report_0001, whose text reads 'Free fluid: No ascites.' A model reference therefore cannot measure negation errors or hallucination at all.",
+    "created": "2026-10-18",
+    "source": "data/reports/patient_a_chunks.json chunks 0-7",
+    "scoring": "A prediction matches an expected fact when the object_name (or any alias) matches case-insensitively after punctuation stripping. 'forbidden' entries are facts explicitly negated or absent in the source: predicting one is a hallucination, not a miss.",
+    "annotation_policy": [
+      "Only facts a careful reader can verify in the chunk text.",
+      "Negated findings ('No ascites', 'No pericardial effusion') go in 'forbidden'.",
+      "Several chunks are OCR'd handwritten flowsheets where labels and values are scrambled beyond reliable reading; these carry few expected facts and a note. Low recall there is a data-quality ceiling, not a model failure.",
+      "Lab values in flowsheets are annotated as label/value pairs only where the pairing is legible."
+    ]
+  },
+  "chunks": [
+    {
+      "index": 0,
+      "report_id": "report_0001",
+      "report_type": "RADIOLOGY_CECT",
+      "note": "Clean typed radiology report. The most reliably extractable chunk, and the one where negation matters most.",
+      "expected": [
+        {
+          "relation": "UNDERWENT",
+          "object_label": "Procedure",
+          "object_name": "CECT of Chest, Abdomen & Pelvis",
+          "aliases": ["CECT", "CECT Chest Abdomen Pelvis", "CECT of Chest Abdomen and Pelvis", "Contrast-Enhanced Computed Tomography", "CECT Chest, Abdomen & Pelvis"],
+          "evidence": "Procedure: CECT of Chest, Abdomen & Pelvis."
+        },
+        {
+          "relation": "STATES_DIAGNOSIS",
+          "object_label": "Diagnosis",
+          "object_name": "Metastatic Breast Cancer",
+          "aliases": ["Metastatic breast cancer", "Breast Cancer", "Metastatic carcinoma breast"],
+          "evidence": "Clinical background: Metastatic breast cancer"
+        },
+        {
+          "relation": "STATES_DIAGNOSIS",
+          "object_label": "Diagnosis",
+          "object_name": "Pleural effusion",
+          "aliases": ["Right pleural effusion", "Loculated right pleural effusion", "Pleural Effusion"],
+          "evidence": "with loculated right pleural effusion"
+        }
+      ],
+      "forbidden": [
+        {"object_name": "Ascites", "reason": "Text states 'Free fluid: No ascites.' Gemini extracted this anyway."},
+        {"object_name": "Pericardial effusion", "reason": "Text states 'No pericardial effusion.'"},
+        {"object_name": "Hydronephrosis", "reason": "Text states 'No hydronephrosis.'"}
+      ]
+    },
+    {
+      "index": 1,
+      "report_id": "report_0002",
+      "report_type": "ONCOLOGY_FLOWSHEET",
+      "note": "OCR'd handwritten flowsheet. Labels and values are largely unpaired. Only ANC is unambiguously legible ('ANC=7992'). Near-zero recall here reflects the OCR, not the model.",
+      "expected": [
+        {
+          "relation": "HAS_RESULT",
+          "object_label": "LabResult",
+          "object_name": "Absolute Neutrophil Count",
+          "aliases": ["ANC", "Absolute Neutrophil Count", "Neutrophil Count"],
+          "properties": {"value": "7992"},
+          "evidence": "ANC=7992"
+        }
+      ],
+      "forbidden": [
+        {"object_name": "7992", "reason": "A value is not a test name."},
+        {"object_name": "11.0", "reason": "A value is not a test name."},
+        {"object_name": "16460", "reason": "A value is not a test name."}
+      ]
+    },
+    {
+      "index": 2,
+      "report_id": "report_0003",
+      "report_type": "RADIOLOGY_PET_CT",
+      "note": "Typed PET-CT report. Rich in findings; OCR dropped the 'not' in 'do show any abnormality', so a negation trap exists here too.",
+      "expected": [
+        {
+          "relation": "UNDERWENT",
+          "object_label": "Procedure",
+          "object_name": "PET-CT",
+          "aliases": ["18F-FDG Whole Body PET-CT", "FDG PET-CT", "PET CT", "Whole Body PET-CT", "18F-FDG PET-CT Study", "Positron Emission Tomography"],
+          "evidence": "18F-FDG WHOLE BODY PET-CT STUDY"
+        },
+        {
+          "relation": "STATES_DIAGNOSIS",
+          "object_label": "Diagnosis",
+          "object_name": "Metastatic Breast Cancer",
+          "aliases": ["Metastatic carcinoma right breast", "Metastatic carcinoma breast", "Breast Cancer", "Carcinoma right breast"],
+          "evidence": "Indication: Metastatic carcinoma right breast"
+        },
+        {
+          "relation": "STATES_DIAGNOSIS",
+          "object_label": "Diagnosis",
+          "object_name": "Pleural effusion",
+          "aliases": ["Right pleural effusion", "Pleural Effusion"],
+          "evidence": "right pleural effusion IS seen"
+        }
+      ],
+      "forbidden": [
+        {"object_name": "Thyroid abnormality", "reason": "Sinuses, pharynx, larynx and thyroid are reported without abnormality (OCR dropped the negation word)."}
+      ]
+    },
+    {
+      "index": 3,
+      "report_id": "report_0004",
+      "report_type": "ONCOLOGY_FLOWSHEET",
+      "note": "FNAC cytology report, typed but noisy, with Devanagari header. Result is explicitly inconclusive — an extractor must not turn 'inconclusive' into a positive diagnosis.",
+      "expected": [
+        {
+          "relation": "UNDERWENT",
+          "object_label": "Procedure",
+          "object_name": "FNAC",
+          "aliases": ["Fine Needle Aspiration Cytology", "Guided FNAC", "FNAC guided sampling", "CYTO-FNAC/GUIDED SAMPLING", "Guided aspirate"],
+          "evidence": "CYTO-FNAC/GUIDED SAMPLING FNAC NO: 403/17"
+        },
+        {
+          "relation": "SUGGESTS_TEST",
+          "object_label": "Procedure",
+          "object_name": "Repeat aspirate",
+          "aliases": ["Repeat FNAC", "Repeat aspirate", "Repeat biopsy"],
+          "evidence": "Adv/Note: Repeat aspirate"
+        }
+      ],
+      "forbidden": [
+        {"object_name": "Metastatic carcinoma", "reason": "FNAC was inconclusive: 'Right pleural thickening Inconclusive.' No malignancy was established by this report."},
+        {"object_name": "Malignancy", "reason": "Result was inconclusive."}
+      ]
+    },
+    {
+      "index": 4,
+      "report_id": "report_0005",
+      "report_type": "CHEMO_DRUG_ADMIN_RECORD",
+      "note": "Chemotherapy administration record. The richest chunk for medications and regimen.",
+      "expected": [
+        {
+          "relation": "STATES_DIAGNOSIS",
+          "object_label": "Diagnosis",
+          "object_name": "Breast Cancer",
+          "aliases": ["CA BREAST", "Carcinoma Breast", "Breast Carcinoma"],
+          "evidence": "Diagnosis CA BREAST"
+        },
+        {
+          "relation": "ADMINISTERED",
+          "object_label": "Medication",
+          "object_name": "Paclitaxel",
+          "aliases": ["Taxol", "Inj Taxol", "Paclitaxel"],
+          "evidence": "Inj Taxol 500 ml NS 3 hrs"
+        },
+        {
+          "relation": "ADMINISTERED",
+          "object_label": "Medication",
+          "object_name": "Trastuzumab",
+          "aliases": ["Herceptin", "Trastuzumab"],
+          "evidence": "Protocol: Taxol D1,D8,D15 + Herceptin wkly c6"
+        },
+        {
+          "relation": "ADMINISTERED",
+          "object_label": "Medication",
+          "object_name": "Ondansetron",
+          "aliases": ["Inj Ondansetron", "Ondansetron"],
+          "evidence": "PREMEDICATION GIVEN Inj Ondansetron IVP"
+        },
+        {
+          "relation": "ADMINISTERED",
+          "object_label": "Medication",
+          "object_name": "Dexamethasone",
+          "aliases": ["Inj Dexamethasone", "Dexamethasone"],
+          "evidence": "Inj Dexamethasone am 9.30"
+        },
+        {
+          "relation": "ADMINISTERED",
+          "object_label": "Medication",
+          "object_name": "Ranitidine",
+          "aliases": ["Inj Ranitidine", "Ranitidine"],
+          "evidence": "Inj Ranitidine"
+        },
+        {
+          "relation": "ADMINISTERED",
+          "object_label": "Regimen",
+          "object_name": "Taxol + Herceptin",
+          "aliases": ["Taxol D1,D8,D15 + Herceptin wkly c6", "Taxol Herceptin", "Paclitaxel + Trastuzumab", "Taxol + Herceptin weekly"],
+          "evidence": "Protocol: Taxol D1,D8,D15 + Herceptin wkly c6"
+        }
+      ],
+      "forbidden": [
+        {"object_name": "Carboplatin", "reason": "Not mentioned anywhere in the chunk."},
+        {"object_name": "Doxorubicin", "reason": "Not mentioned anywhere in the chunk."}
+      ]
+    },
+    {
+      "index": 5,
+      "report_id": "report_0006",
+      "report_type": "ONCOLOGY_FLOWSHEET",
+      "note": "OCR'd handwritten flowsheet. Some label/value pairs are legible on their own line; most are scrambled across dates. Only the legible pairings are annotated. This is the chunk that produced the junk LabTest nodes ('9.3/4', '26/1.1', '31/57', '522000').",
+      "expected": [
+        {
+          "relation": "HAS_RESULT",
+          "object_label": "LabResult",
+          "object_name": "Platelet Count",
+          "aliases": ["Platelets", "Platelates", "Platelet Count"],
+          "properties": {"value": "522000"},
+          "evidence": "Platelates (K 1000) 522000"
+        },
+        {
+          "relation": "HAS_RESULT",
+          "object_label": "LabResult",
+          "object_name": "Blood Urea",
+          "aliases": ["Urea", "Blood Urea"],
+          "properties": {"value": "26"},
+          "evidence": "Blood Urea/Creatinine 26/1.1"
+        },
+        {
+          "relation": "HAS_RESULT",
+          "object_label": "LabResult",
+          "object_name": "Serum Creatinine",
+          "aliases": ["Creatinine", "Serum Creatinine"],
+          "properties": {"value": "1.1"},
+          "evidence": "Blood Urea/Creatinine 26/1.1"
+        },
+        {
+          "relation": "HAS_RESULT",
+          "object_label": "LabResult",
+          "object_name": "Hemoglobin",
+          "aliases": ["HB", "HB/PCV", "Hemoglobin", "Hb"],
+          "properties": {"value": "11.0"},
+          "evidence": "HB/PCV ... 11.0"
+        },
+        {
+          "relation": "HAS_RESULT",
+          "object_label": "LabResult",
+          "object_name": "White Blood Cell Count",
+          "aliases": ["WBC", "WBC (X 1000)", "Total Leukocyte Count", "TLC"],
+          "properties": {"value": "10200"},
+          "evidence": "WBC (X 1000) ... 10,200"
+        }
+      ],
+      "forbidden": [
+        {"object_name": "9.3/4", "reason": "A value pair is not a test name."},
+        {"object_name": "26/1.1", "reason": "A value pair is not a test name."},
+        {"object_name": "31/57", "reason": "A value pair is not a test name."},
+        {"object_name": "522000", "reason": "A value is not a test name."},
+        {"object_name": "0.5", "reason": "A value is not a test name."}
+      ]
+    },
+    {
+      "index": 6,
+      "report_id": "report_0006",
+      "report_type": "ONCOLOGY_FLOWSHEET",
+      "note": "126 characters of unlabelled OCR digits. Nothing is reliably extractable. An extractor should return an empty list; anything it returns here is almost certainly invented.",
+      "expected": [],
+      "forbidden": [
+        {"object_name": "Hemoglobin", "reason": "No label is present in this fragment; any lab name here is guessed from bare digits."},
+        {"object_name": "Platelet Count", "reason": "No label is present in this fragment."}
+      ]
+    },
+    {
+      "index": 7,
+      "report_id": "report_0008",
+      "report_type": "HISTOPATHOLOGY",
+      "note": "Typed histopathology report with receptor status. Biomarker polarity is the thing to get right: ER positive, PR negative, HER2 negative.",
+      "expected": [
+        {
+          "relation": "UNDERWENT",
+          "object_label": "Procedure",
+          "object_name": "Excisional biopsy",
+          "aliases": ["Excisional biopsy of left axillary lymph node", "Excision biopsy", "Lymph node biopsy", "Biopsy"],
+          "evidence": "Excisional biopsy of left axillary lymphnode"
+        },
+        {
+          "relation": "STATES_DIAGNOSIS",
+          "object_label": "Diagnosis",
+          "object_name": "Metastatic Carcinoma",
+          "aliases": ["Metastatic carcinoma", "Metastatic Breast Cancer", "Carcinoma Breast", "Breast Cancer"],
+          "evidence": "shows features of a metastatic carcinoma"
+        },
+        {
+          "relation": "HAS_BIOMARKER",
+          "object_label": "Biomarker",
+          "object_name": "Estrogen Receptor",
+          "aliases": ["ER", "Estrogen Receptor", "ER receptor"],
+          "properties": {"value": "positive"},
+          "evidence": "Estrogen ... receptor-positive(8/8)"
+        },
+        {
+          "relation": "HAS_BIOMARKER",
+          "object_label": "Biomarker",
+          "object_name": "Progesterone Receptor",
+          "aliases": ["PR", "Progesterone Receptor", "PgR"],
+          "properties": {"value": "negative"},
+          "evidence": "Progesterone ... receptor-negative(0)"
+        },
+        {
+          "relation": "HAS_BIOMARKER",
+          "object_label": "Biomarker",
+          "object_name": "HER2",
+          "aliases": ["HER2", "Her 2 neu", "HER2/neu", "Her2neu", "HER-2"],
+          "properties": {"value": "negative"},
+          "evidence": "Her 2 neu-negative(1+)"
+        }
+      ],
+      "forbidden": [
+        {"object_name": "Ki-67", "reason": "No Ki-67 index is reported in this chunk."}
+      ]
+    }
+  ]
+}

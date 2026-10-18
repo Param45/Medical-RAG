@@ -79,7 +79,12 @@ def _get_local_llama_client(model_path: Optional[str] = None) -> Any:
     # answer prompt whenever .env was absent, as it is inside the backend image.
     n_ctx = int(os.getenv("LOCAL_LLM_N_CTX", "8192"))
     n_threads_env = os.getenv("LOCAL_LLM_N_THREADS")
-    n_threads = int(n_threads_env) if n_threads_env and n_threads_env.isdigit() else None
+    if n_threads_env and n_threads_env.isdigit():
+        n_threads = int(n_threads_env)
+    else:
+        # Default to the physical core count. llama.cpp gains nothing from
+        # hyperthreads on this workload, and leaves one core for everything else.
+        n_threads = max(1, (os.cpu_count() or 4) // 2 - 1)
     n_gpu_layers = get_llama_gpu_layers()
 
     model_kwargs: Dict[str, Any] = {
@@ -109,12 +114,63 @@ def _get_local_llama_client(model_path: Optional[str] = None) -> Any:
     return _LOCAL_LLAMA_MODEL
 
 
+# Cache compiled grammars: building one from a schema is not free and the same
+# handful of schemas is reused for every chunk of a build.
+_GRAMMAR_CACHE: Dict[str, Any] = {}
+
+
+# Constrained decoding emits object keys in this order, so it decides the relation
+# before naming the object. The default is alphabetical, which forced the model to
+# commit to object_name first and then pick a relation to match — it chose
+# HAS_TREATMENT_PLAN for a plain diagnosis. Generating the relation first makes the
+# label and the name conditional on a decision already taken.
+_EXTRACTION_PROP_ORDER = [
+    "relation", "subject_label", "subject_name",
+    "object_label", "object_name", "properties",
+]
+
+
+def _get_grammar(schema: Dict[str, Any], prop_order: Optional[List[str]] = None) -> Any:
+    """Compile a JSON schema to a GBNF grammar, or None if unsupported."""
+    order = prop_order or _EXTRACTION_PROP_ORDER
+    key = json.dumps({"schema": schema, "order": order}, sort_keys=True)
+    if key in _GRAMMAR_CACHE:
+        return _GRAMMAR_CACHE[key]
+
+    grammar = None
+    schema_json = json.dumps(schema, sort_keys=True)
+    try:
+        from llama_cpp import LlamaGrammar
+        from llama_cpp.llama_grammar import json_schema_to_gbnf
+        grammar = LlamaGrammar.from_string(
+            json_schema_to_gbnf(schema_json, prop_order=order), verbose=False
+        )
+    except Exception as exc:
+        print(f"[LOCAL LLM] prop_order grammar unavailable ({exc}); trying default order.")
+        try:
+            from llama_cpp import LlamaGrammar
+            grammar = LlamaGrammar.from_json_schema(schema_json, verbose=False)
+        except Exception as exc2:
+            print(f"[LOCAL LLM] Could not compile JSON grammar ({exc2}); sampling unconstrained.")
+
+    _GRAMMAR_CACHE[key] = grammar
+    return grammar
+
+
 def _call_local(
     model: str,
     messages: List[Dict[str, str]],
     system: Optional[str] = None,
+    json_schema: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Run local inference using llama-cpp-python with chat format."""
+    """
+    Run local inference using llama-cpp-python with chat format.
+
+    When json_schema is given, decoding is constrained to that schema. This is the
+    difference between usable and useless structured output from a small local
+    model: it cannot emit a reasoning preamble, cannot invent a field, cannot pick
+    a relation outside the enum, and the reply is short enough not to be truncated.
+    """
     llm = _get_local_llama_client(model)
 
     formatted_messages: List[Dict[str, str]] = []
@@ -139,11 +195,24 @@ def _call_local(
     except Exception:
         pass  # Sizing is an optimisation; let llama.cpp apply its own limits.
 
-    response = llm.create_chat_completion(
-        messages=formatted_messages,
-        max_tokens=max_tokens,
-        temperature=0.1,
-    )
+    kwargs: Dict[str, Any] = {
+        "messages": formatted_messages,
+        "max_tokens": max_tokens,
+        # Extraction is transcription, not composition: sample greedily by default
+        # so the same chunk yields the same facts on every build.
+        "temperature": float(os.getenv("LOCAL_LLM_TEMPERATURE") or 0.0),
+        # Greedy sampling inside a repetitive structure loops; this discourages
+        # re-emitting the same field values over and over.
+        "repeat_penalty": float(os.getenv("LOCAL_LLM_REPEAT_PENALTY") or 1.1),
+    }
+
+    if json_schema and (os.getenv("LOCAL_LLM_JSON_GRAMMAR", "true").strip().lower()
+                        in ("1", "true", "yes")):
+        grammar = _get_grammar(json_schema)
+        if grammar is not None:
+            kwargs["grammar"] = grammar
+
+    response = llm.create_chat_completion(**kwargs)
 
     choices = response.get("choices", [])
     if choices and "message" in choices[0]:
@@ -462,6 +531,7 @@ def chat(
     messages: List[Dict[str, str]],
     system: Optional[str] = None,
     task: Optional[str] = None,
+    json_schema: Optional[Dict[str, Any]] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -594,7 +664,9 @@ def chat(
                 throttle_cloud_call(_estimate_tokens(messages, system))
 
             if is_local:
-                return _call_local(model=model, messages=messages, system=system)
+                return _call_local(
+                    model=model, messages=messages, system=system, json_schema=json_schema
+                )
             elif provider in ("gemini", "google"):
                 return _call_gemini(api_key=api_key, model=model, messages=messages, system=system)
             elif provider == "anthropic":

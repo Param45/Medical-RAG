@@ -30,6 +30,7 @@ class TestLLMClientLocal:
             model="medgemma-1.5-4b-it-Q4_K_M.gguf",
             messages=messages,
             system="You are a medical assistant.",
+            json_schema=None,
         )
 
     def test_local_call_sdk_mock(self):
@@ -289,6 +290,7 @@ class TestTaskRouting:
             model="medgemma-1.5-4b-it-Q4_K_M.gguf",
             messages=messages,
             system=None,
+            json_schema=None,
         )
         mock_gemini.assert_not_called()
 
@@ -308,6 +310,7 @@ class TestTaskRouting:
             model="medgemma-1.5-4b-it-Q4_K_M.gguf",
             messages=messages,
             system=None,
+            json_schema=None,
         )
         mock_gemini.assert_not_called()
 
