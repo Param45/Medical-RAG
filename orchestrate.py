@@ -51,17 +51,24 @@ def extract_and_filter_citations(
     if not answer_text:
         return "", []
 
-    # Find all bracketed tokens that match evidence_id structure
-    # Matches patterns like [patient_a__report_0001__page_1__chunk_0] or [patient_b__report_0002__page_2__chunk_0]
-    citation_pattern = re.compile(r"\[([a-zA-Z0-9_\-]+)\]")
+    # Bracketed evidence ids, e.g. [patient_a__report_0001__page_1__chunk_0].
+    # The evidence block labels each fact "[Citation ID: <id>]", and the model often
+    # copies that wording, so a bare-id-only pattern silently discarded valid
+    # citations: two answers reported 0 citations while quoting real ids. Optional
+    # label and multiple ids per bracket are both accepted.
+    # Scan each bracketed span and keep every token that is a known evidence id.
+    # This accepts a bare id, a labelled one, and several ids listed in one bracket.
+    bracket_pattern = re.compile(r"\[([^\[\]]{0,400})\]")
 
     found_citations: List[str] = []
     seen_valid: Set[str] = set()
 
-    for match in citation_pattern.finditer(answer_text):
-        cid = match.group(1)
-        if cid in valid_evidence_ids:
-            if cid not in seen_valid:
+    # No length rule: membership in valid_evidence_ids is the filter, so label words
+    # like "Citation" fall out on their own and short ids still match.
+    id_token = re.compile(r"[a-zA-Z0-9_\-]+")
+    for bracket in bracket_pattern.finditer(answer_text):
+        for cid in id_token.findall(bracket.group(1)):
+            if cid in valid_evidence_ids and cid not in seen_valid:
                 seen_valid.add(cid)
                 found_citations.append(cid)
 

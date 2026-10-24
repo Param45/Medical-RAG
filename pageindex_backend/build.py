@@ -30,6 +30,7 @@ if hasattr(sys.stdout, "reconfigure"):
 load_dotenv()
 
 from llm_client import chat
+from normalize import resolve_lab_test_name
 from patients import all_patient_ids, get_display_label
 
 
@@ -217,6 +218,7 @@ def build_structured_facts(
         "treatment_plan": {},
         "suggested_tests": [],
         "current_medications": [],
+        "biomarkers": [],
     }
 
     # Attempt to populate from Neo4j.
@@ -323,6 +325,33 @@ def build_structured_facts(
                     "name": rec.get("name"),
                     "dose": rec.get("dose"),
                     "start_date": rec.get("start_date"),
+                    "evidence_id": rec.get("evidence_id"),
+                })
+
+            # 6. Biomarkers / receptor status.
+            # Answered from here rather than from page text because polarity is the
+            # one value a reader cannot sanity-check: PageIndex read
+            # "Her2/neu receptor Positive (3)" off a page and answered "Negative".
+            b_res = session.run(
+                """
+                MATCH (p:Patient {patient_id: $pid})-[:HAS_REPORT]->(r:Report)-[rel:HAS_BIOMARKER]->(b:Biomarker)
+                RETURN b.marker AS marker, b.value AS value,
+                       coalesce(b.date, r.report_date) AS date, rel.evidence_id AS evidence_id
+                """,
+                pid=patient_id,
+            )
+            for rec in b_res:
+                raw_marker = (rec.get("marker") or "").strip()
+                # Extraction stored some report ids in the marker slot; they resolve
+                # to the bare word "report" and carry no biomarker.
+                canonical = resolve_lab_test_name(raw_marker)
+                if not canonical or canonical.lower() == "report":
+                    continue
+                structured_facts["biomarkers"].append({
+                    "marker": canonical,
+                    "raw_marker": raw_marker,
+                    "value": rec.get("value"),
+                    "date": rec.get("date"),
                     "evidence_id": rec.get("evidence_id"),
                 })
         neo4j_success = True

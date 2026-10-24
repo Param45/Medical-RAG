@@ -1,7 +1,7 @@
 # Medical Records RAG Demo — Phase 1 Pipeline Summary
 
-- **Generated**: 2026-10-18 18:37:35
-- **Elapsed Execution Time**: 8.05s
+- **Generated**: 2026-10-19 12:25:25
+- **Elapsed Execution Time**: 7.95s
 
 | Patient ID | Display Label | Pages | Reports Detected | Total Chunks | Evidence Records | Normalized Entities |
 |---|---|---|---|---|---|---|

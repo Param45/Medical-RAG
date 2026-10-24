@@ -104,6 +104,16 @@ def should_allow_multi(question: str) -> bool:
         "follow-up",
         "monitoring",
         "throughout",
+        "recur",
+        "recurred",
+        "recurrence",
+        "recurrent",
+        "relapse",
+        "come back",
+        "came back",
+        "spread",
+        "metastasis",
+        "metastases",
     ]
 
     for kw in multi_keywords:
@@ -128,6 +138,18 @@ def is_structured_query(question: str) -> bool:
         r"(?:sugar|glucose|creatinine|hemoglobin|hb|platelet|wbc|bilirubin).*?(?:level|value|trend|reading|status|in\s+\w+|on\s+\d+)",
         r"(?:trend|improvement|improving|better|worse).*?(?:health|test|marker|sugar|creatinine|hb|lab)",
         r"are there any improvements in my health",
+        # Receptor/biomarker status. Polarity is read from the graph, not from page
+        # text, because a reader cannot sanity-check it: asked for ER/PR/HER2 this
+        # engine read "Her2/neu receptor Positive (3)" off its own cited page and
+        # answered "Negative" — the value that decides trastuzumab eligibility.
+        r"\b(?:er|pr|esr1|hormon\w*)\b.*\b(?:status|receptor|positive|negative)\b",
+        r"\b(?:her-?2|her2neu|her2/neu|ki-?67|receptor|biomarker|immunohistochem\w*|ihc)\b",
+        r"\b(?:estrogen|progesterone)\b",
+        # Drug lists. Read from the graph so doses are not invented: asked which
+        # chemotherapy drugs were given, this engine paired a floating OCR dose
+        # column to drug names and reported "Taxol: 8 mg" (the antiemetic's dose).
+        r"\b(?:which|what|list|all)\b.*\b(?:drug|drugs|medication\w*|medicine\w*|chemo\w*|regimen\w*)\b",
+        r"\b(?:drug|drugs|medication\w*|chemo\w*|regimen\w*)\b.*\b(?:given|received|administered|taking|prescribed|on)\b",
     ]
     for pat in patterns:
         if re.search(pat, q_lower):
@@ -149,8 +171,25 @@ def resolve_structured_query(
 
     q_lower = question.lower()
 
-    # 1. Chemo cycle / remaining query
-    if any(w in q_lower for w in ["cycle", "round", "chemo", "chemotherapy"]):
+    # A compound question ("receptor status AND chemotherapy") matches more than one
+    # category. Returning at the first match answered only half of it, so every
+    # matching branch contributes and the caller gets the union.
+    collected: List[Dict[str, Any]] = []
+
+    # 1. Chemo cycle / remaining query.
+    # Requires a cycle word AND a count/status word. Matching the bare word "chemo"
+    # made this branch swallow drug-list questions ("which chemotherapy drugs have I
+    # been given?") and answer them with a cycle count, returning before the
+    # medication branch below could run.
+    asks_cycle_count = bool(
+        re.search(r"\b(?:cycle|cycles|round|rounds|session|sessions|fraction|fractions)\b", q_lower)
+        and re.search(
+            r"\b(?:remain|remaining|left|complete|completed|finished|many|count|number"
+            r"|next|status|scheduled|current)\b",
+            q_lower,
+        )
+    )
+    if asks_cycle_count:
         chemo_cycles = structured_facts.get("chemo_cycles", [])
         plan = structured_facts.get("treatment_plan", {})
 
@@ -184,13 +223,13 @@ def resolve_structured_query(
                     f"of {regimen}. The total planned number of cycles is not documented in the available "
                     f"records, so the number remaining cannot be determined."
                 )
-            return [{
+            collected.append({
                 "text": text,
                 "patient_id": patient_id,
                 "evidence_id": ev_id,
                 "confidence": 1.0,
                 "node_id": "structured_facts_chemo",
-            }]
+            })
 
     # 2. Suggested vs Performed tests query
     if ("suggested" in q_lower or "advised" in q_lower) and ("test" in q_lower or "perform" in q_lower or "done" in q_lower):
@@ -212,15 +251,86 @@ def resolve_structured_query(
                 f"Tests performed: {p_str}. "
                 f"Tests pending/not performed: {pend_str}."
             )
-            return [{
+            collected.append({
                 "text": text,
                 "patient_id": patient_id,
                 "evidence_id": ev_id,
                 "confidence": 1.0,
                 "node_id": "structured_facts_suggested_tests",
-            }]
+            })
 
-    # 3. Lab time series / trends / specific lab values
+    # 3. Receptor / biomarker status, reported verbatim.
+    biomarkers = structured_facts.get("biomarkers") or []
+    if biomarkers and re.search(
+        r"\b(?:receptor|biomarker|her-?2|her2neu|her2/neu|ki-?67|estrogen|progesterone|ihc"
+        r"|immunohistochem\w*|hormonal)\b|\b(?:er|pr)\b",
+        q_lower,
+    ):
+        by_marker: Dict[str, List[Dict[str, Any]]] = {}
+        for item in biomarkers:
+            name = (item.get("marker") or "").strip()
+            if name:
+                by_marker.setdefault(name, []).append(item)
+
+        facts: List[Dict[str, Any]] = []
+        for name, items in by_marker.items():
+            # Keep each distinct recorded value, in date order, worded exactly as the
+            # report wrote it ("Positive (3+)", "8/8"). No polarity is inferred and
+            # none is summarised away, so a later value never silently overwrites an
+            # earlier one.
+            seen_values: List[str] = []
+            for it in sorted(items, key=lambda x: str(x.get("date") or "")):
+                val = str(it.get("value") or "").strip()
+                if val and val not in seen_values:
+                    seen_values.append(val)
+            if not seen_values:
+                continue
+            ev = next((i.get("evidence_id") for i in items if i.get("evidence_id")), "")
+            dated = "; ".join(
+                f"{str(it.get('value') or '').strip()} ({it.get('date') or 'undated'})"
+                for it in sorted(items, key=lambda x: str(x.get("date") or ""))
+                if str(it.get("value") or "").strip()
+            )
+            facts.append({
+                "text": f"{name}: recorded as {dated}. Value(s) quoted exactly as documented.",
+                "patient_id": patient_id,
+                "evidence_id": ev,
+                "confidence": 1.0,
+                "node_id": f"structured_facts_biomarker_{name.lower().replace(' ', '_')}",
+            })
+        collected.extend(facts)
+
+    # 4. Medications and regimens actually recorded.
+    medications = structured_facts.get("current_medications") or []
+    if medications and re.search(
+        r"\b(?:drug|drugs|medication\w*|medicine\w*|chemo\w*|regimen\w*|treatment)\b", q_lower
+    ):
+        seen_names: List[str] = []
+        ev_id = ""
+        lines: List[str] = []
+        for item in medications:
+            name = (item.get("name") or "").strip()
+            if not name or name in seen_names:
+                continue
+            seen_names.append(name)
+            ev_id = ev_id or (item.get("evidence_id") or "")
+            dose = str(item.get("dose") or "").strip()
+            # A dose is stated only where extraction captured one for THIS drug.
+            lines.append(f"{name}" + (f" (documented dose: {dose})" if dose else ""))
+        if lines:
+            collected.append({
+                "text": (
+                    "Documented medications and regimens: " + "; ".join(lines) + ". "
+                    "Doses appear only where the record attaches one to that drug; "
+                    "where no dose is shown, none was documented."
+                ),
+                "patient_id": patient_id,
+                "evidence_id": ev_id,
+                "confidence": 1.0,
+                "node_id": "structured_facts_medications",
+            })
+
+    # 5. Lab time series / trends / specific lab values
     lab_series = structured_facts.get("lab_time_series", [])
     if lab_series:
         # Group by resolved test name. Extraction stores values and row ids in the test
@@ -278,10 +388,9 @@ def resolve_structured_query(
                 "node_id": f"structured_facts_lab_{name.lower().replace(' ', '_')}",
             })
 
-        if facts:
-            return facts
+        collected.extend(facts)
 
-    return None
+    return collected or None
 
 
 def _parse_llm_node_selection(llm_response: str, available_node_ids: List[str]) -> List[str]:
@@ -329,6 +438,86 @@ def _parse_llm_node_selection(llm_response: str, available_node_ids: List[str]) 
             found_nodes.append(nid)
 
     return found_nodes
+
+
+# Words too common in clinical prose to identify a document.
+_ROUTING_STOPWORDS = {
+    "the", "and", "for", "are", "was", "were", "has", "have", "had", "did", "does",
+    "what", "which", "when", "where", "any", "all", "other", "my", "me", "i", "is",
+    "in", "on", "of", "to", "a", "an", "it", "its", "been", "being", "from", "that",
+    "this", "these", "those", "there", "about", "documented", "record", "records",
+    "report", "reports", "patient", "please", "tell", "show", "list", "give",
+    "apart", "besides", "also", "after", "before", "with", "status", "found",
+}
+
+
+# Patients ask in lay words; reports are written in clinical ones. Without this,
+# "has my cancer come back" shares no vocabulary with "Recurrent carcinoma" and the
+# report holding the answer is never shortlisted.
+_LAY_TO_CLINICAL = {
+    "come back": ("recurrent", "recurrence", "relapse"),
+    "came back": ("recurrent", "recurrence", "relapse"),
+    "return": ("recurrent", "recurrence"),
+    "returned": ("recurrent", "recurrence"),
+    "spread": ("metastasis", "metastatic", "metastases"),
+    "spreading": ("metastasis", "metastatic"),
+    "lump": ("mass", "nodule", "lesion"),
+    "other conditions": ("comorbid", "history", "known case"),
+    "other medical conditions": ("comorbid", "history", "known case"),
+    "conditions": ("comorbid", "diagnosis", "known case"),
+    "surgery": ("mastectomy", "lumpectomy", "excision", "operative"),
+    "operation": ("mastectomy", "lumpectomy", "excision"),
+    "sugar": ("glucose",),
+    "kidney": ("renal", "creatinine"),
+    "liver": ("hepatic", "sgot", "sgpt"),
+}
+
+
+def _routing_terms(question: str) -> set:
+    """Distinctive words from the question, expanded with clinical equivalents."""
+    q = (question or "").lower()
+    words = re.findall(r"[a-z0-9][a-z0-9\-/]{2,}", q)
+    terms = {w for w in words if w not in _ROUTING_STOPWORDS}
+
+    for lay, clinical in _LAY_TO_CLINICAL.items():
+        if lay in q or lay in terms:
+            terms.update(clinical)
+
+    return terms
+
+
+def lexically_relevant_children(
+    question: str,
+    children: List[Dict[str, Any]],
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    """
+    Children whose own text matches the question's distinctive words.
+
+    Selection is otherwise done by an LLM reading each child's generated SUMMARY, so
+    a report whose summary omits a detail can never be shortlisted however wide the
+    traversal: asked whether the cancer had recurred, this engine explored several
+    reports and answered "Not documented" while 'Recurrent carcinoma' sat in a report
+    it never considered. Matching the raw text as well gives those documents a way in.
+    """
+    terms = _routing_terms(question)
+    if not terms:
+        return []
+
+    scored = []
+    for child in children:
+        haystack = " ".join(
+            str(child.get(k) or "") for k in ("summary", "raw_text", "report_type")
+        ).lower()
+        # Include leaf page text, which is where a detail usually lives.
+        for leaf in child.get("children", []) or []:
+            haystack += " " + str(leaf.get("raw_text") or "").lower()
+        hits = sum(1 for t in terms if t in haystack)
+        if hits:
+            scored.append((hits, child))
+
+    scored.sort(key=lambda pair: -pair[0])
+    return [child for _, child in scored[:limit]]
 
 
 def select_children(
@@ -418,6 +607,15 @@ def select_children(
         selected_ids = selected_ids[:1]
 
     selected_children = [child_map[cid] for cid in selected_ids if cid in child_map]
+
+    # Union the LLM's picks with documents whose own text matches the question, so a
+    # thin or generic summary cannot hide the report that holds the answer.
+    chosen_ids = {c.get("node_id") for c in selected_children}
+    for child in lexically_relevant_children(question, children, limit=3 if allow_multi else 2):
+        if child.get("node_id") not in chosen_ids:
+            selected_children.append(child)
+            chosen_ids.add(child.get("node_id"))
+
     return selected_children
 
 

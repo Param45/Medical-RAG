@@ -727,7 +727,10 @@ def classify_intents(question: str) -> List[str]:
     if any(re.search(rf"\b{re.escape(k)}\b", q_lower) for k in [
         "diagnosis", "diagnoses", "disease", "diseases", "suffering from", "condition", "conditions",
         "illness", "what cancer", "type of cancer", "pathology finding", "heart disease", "diabetes",
-        "hypertension", "infection", "kidney disease", "liver disease"
+        "hypertension", "infection", "kidney disease", "liver disease",
+        "cancer", "carcinoma", "tumour", "tumor", "recur", "recurred", "recurrence",
+        "recurrent", "relapse", "relapsed", "come back", "came back", "spread",
+        "metastasis", "metastases", "metastatic", "remission",
     ]):
         matched.append("diagnosis_list")
 

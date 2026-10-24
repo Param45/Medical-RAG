@@ -14,7 +14,7 @@ from graph_backend.retrieve import (
     classify_intents,
     get_improvement_trend,
 )
-from orchestrate import build_facts_block
+from orchestrate import build_facts_block, extract_and_filter_citations
 from pageindex_backend.retrieve import resolve_structured_query
 
 
@@ -237,3 +237,158 @@ class TestCanonicalNamesAreNotCollapsed:
             "Mean Corpuscular Hemoglobin"
         )
         assert resolve_lab_test_name("1.10") is None
+
+
+class TestCitationFormsAreAllAccepted:
+    """
+    The evidence block labels each fact "[Citation ID: <id>]" and the model copies
+    that wording, so a bare-id-only pattern discarded valid citations: two answers
+    in a live run reported 0 citations while quoting real evidence ids.
+    """
+
+    VALID = {
+        "patient_a__report_0001__page_1__chunk_0",
+        "patient_b__report_0023__page_25__chunk_0",
+    }
+
+    @pytest.mark.parametrize("text,expected", [
+        ("see [patient_a__report_0001__page_1__chunk_0].", 1),
+        ("see [Citation ID: patient_a__report_0001__page_1__chunk_0].", 1),
+        ("see [citation: patient_b__report_0023__page_25__chunk_0].", 1),
+        ("see [Citations IDs: patient_a__report_0001__page_1__chunk_0; "
+         "patient_b__report_0023__page_25__chunk_0].", 2),
+        ("see [patient_a__report_0001__page_1__chunk_0], "
+         "[patient_b__report_0023__page_25__chunk_0].", 2),
+    ])
+    def test_accepted_forms(self, text, expected):
+        _, cites = extract_and_filter_citations(text, self.VALID)
+        assert len(cites) == expected
+
+    def test_unknown_ids_are_still_rejected(self):
+        _, cites = extract_and_filter_citations(
+            "see [made_up_evidence_id] and [Citation ID: also__not__real]", self.VALID
+        )
+        assert cites == []
+
+    def test_each_id_is_reported_once(self):
+        _, cites = extract_and_filter_citations(
+            "a [patient_a__report_0001__page_1__chunk_0] "
+            "b [Citation ID: patient_a__report_0001__page_1__chunk_0]", self.VALID
+        )
+        assert cites == ["patient_a__report_0001__page_1__chunk_0"]
+
+
+class TestRecurrenceQuestionsReachDiagnoses:
+    """
+    "Has my cancer come back after surgery?" routed to medication_history alone,
+    because "surgery" matched that list and plain "cancer" matched nothing — so
+    STATES_DIAGNOSIS was never queried and the recurrence was reported as
+    "Not documented in the available records" by both engines.
+    """
+
+    @pytest.mark.parametrize("question", [
+        "Has my cancer come back after surgery, and what was found?",
+        "Has my cancer recurred?",
+        "Did the tumour relapse after my operation?",
+        "Has the cancer spread anywhere?",
+        "Is there any metastasis documented?",
+    ])
+    def test_diagnosis_intent_is_included(self, question):
+        assert "diagnosis_list" in classify_intents(question)
+
+    @pytest.mark.parametrize("question", [
+        "Has my cancer come back after surgery?",
+        "Did my carcinoma recur?",
+        "Has the disease spread to the bones?",
+    ])
+    def test_pageindex_widens_traversal(self, question):
+        from pageindex_backend.retrieve import should_allow_multi
+        assert should_allow_multi(question) is True
+
+
+class TestLexicalDocumentShortlisting:
+    """
+    PageIndex selects documents by their LLM-generated summary, so a report whose
+    summary omits a detail can never be shortlisted however wide the traversal:
+    asked whether the cancer had recurred it explored several reports and answered
+    "Not documented" while 'Recurrent carcinoma' sat in one it never considered.
+    """
+
+    CHILDREN = [
+        {"node_id": "r1", "summary": "Discharge summary after admission.",
+         "children": [{"raw_text": "Patient admitted for observation. Stable."}]},
+        {"node_id": "r2", "summary": "Follow-up visit.",
+         "children": [{"raw_text": "Post lumpectomy recurrent lump left breast noted."}]},
+        {"node_id": "r3", "summary": "Routine review.",
+         "children": [{"raw_text": "Known case of bronchial asthma and seizure disorder."}]},
+    ]
+
+    def test_lay_wording_still_finds_the_clinical_record(self):
+        from pageindex_backend.retrieve import lexically_relevant_children
+        got = lexically_relevant_children(
+            "Has my cancer come back after surgery?", self.CHILDREN, limit=2
+        )
+        assert "r2" in [c["node_id"] for c in got], (
+            "'come back' must reach 'recurrent'"
+        )
+
+    def test_comorbidity_question_finds_the_comorbidity_report(self):
+        from pageindex_backend.retrieve import lexically_relevant_children
+        got = lexically_relevant_children(
+            "Apart from cancer, what other medical conditions do I have?",
+            self.CHILDREN, limit=2,
+        )
+        assert "r3" in [c["node_id"] for c in got]
+
+    def test_no_distinctive_terms_shortlists_nothing(self):
+        from pageindex_backend.retrieve import lexically_relevant_children
+        assert lexically_relevant_children("What about it?", self.CHILDREN) == []
+
+    def test_stopwords_alone_do_not_match(self):
+        from pageindex_backend.retrieve import _routing_terms
+        assert _routing_terms("what are the records for my report") == set()
+
+
+class TestStructuredBranchesUnion:
+    """
+    A compound question matches more than one category. Returning at the first match
+    answered only half of it: asked for receptor status AND chemotherapy, the engine
+    reported receptors and silently dropped the drugs.
+    """
+
+    FACTS = {
+        "chemo_cycles": [], "treatment_plan": {}, "suggested_tests": [],
+        "lab_time_series": [],
+        "biomarkers": [
+            {"marker": "Human Epidermal Growth Factor Receptor 2",
+             "value": "Positive (3+)", "date": "2014-05-28", "evidence_id": "ev1"},
+        ],
+        "current_medications": [
+            {"name": "Epirubicin", "dose": "110 mg", "evidence_id": "ev2"},
+        ],
+    }
+
+    def test_compound_question_returns_both_categories(self):
+        facts = resolve_structured_query(
+            "Compare the receptor status and the chemotherapy given.",
+            "patient_b", self.FACTS,
+        )
+        nodes = " ".join(f["node_id"] for f in facts)
+        assert "biomarker" in nodes and "medications" in nodes
+
+    def test_her2_polarity_is_quoted_verbatim(self):
+        facts = resolve_structured_query(
+            "What is my HER2 status?", "patient_b", self.FACTS
+        )
+        text = " ".join(f["text"] for f in facts)
+        assert "Positive (3+)" in text
+        assert "negative" not in text.lower()
+
+    def test_dose_absence_is_not_filled_in(self):
+        facts = resolve_structured_query(
+            "Which drugs was I given?", "patient_b",
+            {**self.FACTS, "current_medications": [{"name": "Paclitaxel", "evidence_id": "e"}]},
+        )
+        text = " ".join(f["text"] for f in facts)
+        assert "Paclitaxel" in text
+        assert "mg" not in text
